@@ -227,6 +227,9 @@ RÈGLES IMPORTANTES
 - "feedback" : court, français, dit ce qui a été fait.`;
 }
 
+// Démarrage à froid : vrai uniquement pour la première requête traitée par cette instance.
+let warm = false;
+
 // Fonction qui appelle un modèle Gemini donné
 async function callGemini(modelName, apiKey, systemPrompt, instruction) {
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${apiKey}`;
@@ -247,6 +250,9 @@ async function callGemini(modelName, apiKey, systemPrompt, instruction) {
 
 export default async function handler(req, res) {
   if (req.method !== 'POST') return res.status(405).json({ error: 'Méthode non autorisée' });
+  const tStart = Date.now();
+  const cold = !warm;
+  warm = true;
 
   const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey) return res.status(500).json({ error: "Clé API manquante. Configure GEMINI_API_KEY dans Vercel." });
@@ -258,6 +264,7 @@ export default async function handler(req, res) {
 
   // 1. Tentative avec Flash (modèle principal)
   let usedFallback = false;
+  const tGemini = Date.now();
   let r = await callGemini('gemini-2.5-flash', apiKey, systemPrompt, instruction);
 
   // 2. Si quota 429, fallback automatique sur Lite
@@ -272,6 +279,7 @@ export default async function handler(req, res) {
   }
 
   const data = await r.json();
+  const geminiMs = Date.now() - tGemini;
   const text = data.candidates?.[0]?.content?.parts?.[0]?.text || '';
   const cleaned = text.replace(/```json|```/g, '').trim();
 
@@ -285,6 +293,15 @@ export default async function handler(req, res) {
   if (!parsed.actions) parsed.actions = [];
   if (!parsed.feedback) parsed.feedback = 'Mis à jour.';
   parsed.usedFallback = usedFallback;
+  // Mesures affichées dans Réglages → Diagnostic de vitesse
+  parsed.timing = {
+    serverMs: Date.now() - tStart,
+    geminiMs,
+    cold,
+    model: usedFallback ? 'gemini-2.5-flash-lite' : 'gemini-2.5-flash',
+    thoughtsTokens: data.usageMetadata?.thoughtsTokenCount || 0,
+    promptTokens: data.usageMetadata?.promptTokenCount || 0,
+  };
 
   return res.status(200).json(parsed);
 }

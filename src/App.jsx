@@ -1,9 +1,10 @@
-import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
+import React, { useState, useEffect, useRef, useMemo, useCallback, memo } from 'react';
 import {
   ChevronLeft, ChevronRight, Send, Trash2, List, Loader2, RotateCcw, X,
   Settings as SettingsIcon, Sun, Moon, Monitor,
 } from 'lucide-react';
 import { loadState, saveState } from './lib/storage.js';
+import { recordOpen, recordMonthChange, recordPhrase, getMeasures } from './lib/perf.js';
 
 // ============================================================
 // CONSTANTES
@@ -128,11 +129,12 @@ const DEFAULT_STATE = {
 // ============================================================
 // HOOKS
 // ============================================================
+// Valeurs lues dès le premier rendu : sinon l'app dessine d'abord la version
+// ordinateur (ou le thème clair), puis tout redessine une fraction de seconde après.
 function useIsMobile() {
-  const [isMobile, setIsMobile] = useState(false);
+  const [isMobile, setIsMobile] = useState(() => window.innerWidth < 640);
   useEffect(() => {
     const check = () => setIsMobile(window.innerWidth < 640);
-    check();
     window.addEventListener('resize', check);
     return () => window.removeEventListener('resize', check);
   }, []);
@@ -140,12 +142,12 @@ function useIsMobile() {
 }
 
 function useTheme(preferred) {
-  const [systemDark, setSystemDark] = useState(false);
+  const [systemDark, setSystemDark] = useState(() =>
+    !!window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches);
   useEffect(() => {
     if (!window.matchMedia) return;
     const mq = window.matchMedia('(prefers-color-scheme: dark)');
     const upd = () => setSystemDark(mq.matches);
-    upd();
     mq.addEventListener('change', upd);
     return () => mq.removeEventListener('change', upd);
   }, []);
@@ -175,7 +177,9 @@ function useSwipe(onLeft, onRight) {
 // ============================================================
 // LOGIQUE CALENDRIER (centrale)
 // ============================================================
-function getDayContent(date, currentMonth, state) {
+function buildCatMap(state) { return new Map(state.categories.map(c => [c.id, c])); }
+
+function getDayContent(date, currentMonth, state, catById = buildCatMap(state)) {
   const dateStr = fmtDate(date);
   const inMonth = date.getMonth() + 1 === currentMonth;
   const wd = mondayIdx(date);
@@ -193,7 +197,7 @@ function getDayContent(date, currentMonth, state) {
     if (r.endDate && dateStr > r.endDate) return false;
     if (r.weekdays && !r.weekdays.includes(wd)) return false;
     if (r.exceptions && r.exceptions.includes(dateStr)) return false;
-    const cat = state.categories.find(c => c.id === r.categoryId);
+    const cat = catById.get(r.categoryId);
     // Si catégorie "work" et c'est un férié → masquer (sauf override ponctuel)
     if (cat && cat.kind === 'work' && holiday) {
       const hasOverride = matchingEvents.some(e => e.categoryId === r.categoryId);
@@ -206,14 +210,14 @@ function getDayContent(date, currentMonth, state) {
   let activeCategories = [];
   const seen = new Set();
   for (const e of matchingEvents) {
-    const cat = state.categories.find(c => c.id === e.categoryId);
+    const cat = catById.get(e.categoryId);
     if (cat && !seen.has(cat.id)) {
       seen.add(cat.id);
       activeCategories.push({ category: cat, source: 'event', event: e });
     }
   }
   for (const r of matchingRules) {
-    const cat = state.categories.find(c => c.id === r.categoryId);
+    const cat = catById.get(r.categoryId);
     if (cat && !seen.has(cat.id)) {
       seen.add(cat.id);
       activeCategories.push({ category: cat, source: 'rule', rule: r });
@@ -250,8 +254,7 @@ function resolveCellBackground(c, theme) {
 // ============================================================
 // CELLULES
 // ============================================================
-function DesktopDayCell({ date, currentMonth, state, theme, onTap }) {
-  const c = getDayContent(date, currentMonth, state);
+function DesktopDayCell({ date, c, theme, onTap }) {
   const bg = resolveCellBackground(c, theme);
   const pills = c.activeCategories.filter(ac => ac.category.pillColor);
   const vacationLabel = c.activeCategories.find(ac => ac.category.kind === 'vacation' && ac.source === 'event');
@@ -298,8 +301,7 @@ function DesktopDayCell({ date, currentMonth, state, theme, onTap }) {
   );
 }
 
-function MobileDayCell({ date, currentMonth, state, theme, isSelected, onTap }) {
-  const c = getDayContent(date, currentMonth, state);
+function MobileDayCell({ date, c, theme, isSelected, onTap }) {
   const bg = resolveCellBackground(c, theme);
   const dots = c.activeCategories.map(ac => ac.category.pillColor || ac.category.cellColor).filter(Boolean).slice(0, 4);
   return (
@@ -329,21 +331,23 @@ function MobileDayCell({ date, currentMonth, state, theme, isSelected, onTap }) 
 }
 
 // ============================================================
-// GRILLE — avec animation fade au changement de mois
+// GRILLE — mémorisée : ne se redessine que si le mois, les données,
+// le thème ou le jour sélectionné changent (pas à chaque lettre tapée).
 // ============================================================
-function MonthGrid({ year, month, state, theme, isMobile, selected, setSelected, anim }) {
-  const weeks = useMemo(() => getMonthWeeks(year, month), [year, month]);
+const MonthGrid = memo(function MonthGrid({ year, month, state, theme, isMobile, selected, setSelected, slideDir }) {
+  const days = useMemo(() => {
+    const catById = buildCatMap(state);
+    return getMonthWeeks(year, month).flat().map(d => ({ d, ds: fmtDate(d), c: getDayContent(d, month, state, catById) }));
+  }, [year, month, state]);
   const DaysHeader = isMobile ? FR_DAYS_SHORT : FR_DAYS_FULL;
   return (
-    <div style={{
+    <div key={`${year}-${month}`} style={{
       background: theme.cardBg,
       border: isMobile ? 'none' : `1px solid ${theme.grid}`,
       borderRadius: isMobile ? 14 : 0,
       overflow: 'hidden',
       boxShadow: isMobile ? '0 1px 0 rgba(0,0,0,0.04)' : 'none',
-      opacity: anim === 'in' ? 1 : 0.4,
-      transform: anim === 'in' ? 'translateX(0)' : (anim === 'out-left' ? 'translateX(-12px)' : 'translateX(12px)'),
-      transition: 'opacity 0.18s ease-out, transform 0.18s ease-out',
+      animation: slideDir ? `${slideDir > 0 ? 'slideFromRight' : 'slideFromLeft'} 0.16s ease-out` : 'none',
     }}>
       <div style={{
         display: 'grid', gridTemplateColumns: 'repeat(7, 1fr)',
@@ -361,23 +365,23 @@ function MonthGrid({ year, month, state, theme, isMobile, selected, setSelected,
         ))}
       </div>
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(7, 1fr)' }}>
-        {weeks.flat().map((d, i) => isMobile ? (
-          <MobileDayCell key={i} date={d} currentMonth={month} state={state} theme={theme}
-            isSelected={selected && fmtDate(d) === selected}
-            onTap={() => setSelected(fmtDate(d))} />
+        {days.map(({ d, ds, c }, i) => isMobile ? (
+          <MobileDayCell key={i} date={d} c={c} theme={theme}
+            isSelected={selected === ds}
+            onTap={() => setSelected(ds)} />
         ) : (
-          <DesktopDayCell key={i} date={d} currentMonth={month} state={state} theme={theme}
-            onTap={() => setSelected(fmtDate(d))} />
+          <DesktopDayCell key={i} date={d} c={c} theme={theme}
+            onTap={() => setSelected(ds)} />
         ))}
       </div>
     </div>
   );
-}
+});
 
 // ============================================================
 // DÉTAIL D'UN JOUR
 // ============================================================
-function DayDetail({ dateStr, state, theme, isMobile, onClose }) {
+const DayDetail = memo(function DayDetail({ dateStr, state, theme, isMobile, onClose }) {
   if (!dateStr) return null;
   const date = parseDate(dateStr);
   const c = getDayContent(date, date.getMonth() + 1, state);
@@ -419,7 +423,7 @@ function DayDetail({ dateStr, state, theme, isMobile, onClose }) {
       )}
     </div>
   );
-}
+});
 function DetailRow({ theme, color, label, sub, emoji }) {
   return (
     <div style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '10px 0', borderBottom: `1px solid ${theme.gridLight}` }}>
@@ -632,6 +636,8 @@ function SettingsSheet({ state, setState, theme, onClose, isMobile, counts }) {
           )}
       </Section>
 
+      <DiagnosticSection theme={theme} />
+
       <Section title="Données" theme={theme}>
         <button onClick={() => {
           if (confirm('Effacer TOUTES tes données ?')) { setState(DEFAULT_STATE); onClose(); }
@@ -659,6 +665,40 @@ function SettingsSheet({ state, setState, theme, onClose, isMobile, counts }) {
     );
   }
   return <div style={{ width: 360, background: theme.cardBg, borderLeft: `1px solid ${theme.grid}`, overflowY: 'auto' }}>{content}</div>;
+}
+
+function DiagnosticSection({ theme }) {
+  const m = getMeasures();
+  const row = (label, value) => <CountRow key={label} theme={theme} color={theme.textSecondary} label={label} value={value} />;
+  return (
+    <Section title="Diagnostic de vitesse" theme={theme}>
+      {row('Ouverture de l\'app', m.open === null ? '—' : `${m.open} ms`)}
+      {row('Changements de mois', m.month.length ? m.month.map(v => `${v}`).join(' · ') + ' ms' : '—')}
+      {m.phrase.length === 0 && row('Phrases envoyées', '—')}
+      {m.phrase.map((p, i) => {
+        const t = p.timing;
+        const parts = p.error ? ['erreur'] : [
+          t && `Gemini ${t.geminiMs} ms`,
+          t && `serveur ${t.serverMs} ms`,
+          t && t.thoughtsTokens > 0 && `${t.thoughtsTokens} jetons de réflexion`,
+          t && t.cold && 'démarrage à froid',
+          `affichage ${p.appMs} ms`,
+        ].filter(Boolean);
+        return (
+          <div key={i} style={{ padding: '6px 0', borderBottom: `1px solid ${theme.gridLight}` }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 14 }}>
+              <span>Phrase {i + 1}</span>
+              <span style={{ color: theme.textSecondary, fontWeight: 500 }}>{p.networkMs} ms au total</span>
+            </div>
+            <div style={{ fontSize: 12, color: theme.textSecondary, marginTop: 2 }}>{parts.join(' · ')}</div>
+          </div>
+        );
+      })}
+      <p style={{ fontSize: 12, color: theme.textSecondary, margin: '8px 0 0' }}>
+        Mesures de cette session uniquement, gardées sur l'appareil. Les plus récentes en premier.
+      </p>
+    </Section>
+  );
 }
 
 function DayMonthInput({ theme, day, month, onChange }) {
@@ -772,11 +812,20 @@ function computeCounts(state, refDate) {
   const wkStart = new Date(y, 0, 1);
   const wkEnd = new Date(y, 11, 31);
   const stages = {}, work = {}, colors = {};
+  const workCats = [];
   for (const c of state.categories) {
     if (c.kind !== 'work') continue;
     if (c.subkind === 'stage') stages[c.name] = 0; else work[c.name] = 0;
     colors[c.name] = c.pillColor || c.cellColor;
+    // Pré-tri une seule fois (au lieu de re-filtrer toutes les listes pour chacun des 365 jours)
+    workCats.push({
+      cat: c,
+      rules: state.recurringRules.filter(r => r.categoryId === c.id)
+        .map(r => ({ ...r, exceptions: new Set(r.exceptions || []) })),
+      events: state.events.filter(e => e.categoryId === c.id),
+    });
   }
+  const vacEvents = state.events.filter(e => vacIds.has(e.categoryId));
   const it = new Date(wkStart);
   while (it <= wkEnd) {
     const wd = mondayIdx(it);
@@ -784,27 +833,22 @@ function computeCounts(state, refDate) {
     const hol = isHoliday(it);
 
     // Si l'utilisateur est en vacances ce jour, on ne compte pas
-    const inVac = state.events.some(e => vacIds.has(e.categoryId) && ds >= e.startDate && ds <= (e.endDate || e.startDate));
+    const inVac = vacEvents.some(e => ds >= e.startDate && ds <= (e.endDate || e.startDate));
 
     if (!hol && !inVac) {
-      for (const cat of state.categories) {
-        if (cat.kind !== 'work') continue;
+      for (const { cat, rules, events } of workCats) {
         // 1. Vérifier les règles récurrentes
-        const rules = state.recurringRules.filter(r => r.categoryId === cat.id);
         let active = false;
         for (const r of rules) {
           if (r.startDate && ds < r.startDate) continue;
           if (r.endDate && ds > r.endDate) continue;
           if (r.weekdays && !r.weekdays.includes(wd)) continue;
-          if (r.exceptions && r.exceptions.includes(ds)) continue;
+          if (r.exceptions.has(ds)) continue;
           active = true; break;
         }
         // 2. Vérifier aussi les événements ponctuels (jours ajoutés un par un)
         if (!active) {
-          active = state.events.some(e =>
-            e.categoryId === cat.id &&
-            ds >= e.startDate && ds <= (e.endDate || e.startDate)
-          );
+          active = events.some(e => ds >= e.startDate && ds <= (e.endDate || e.startDate));
         }
         if (active) {
           if (cat.subkind === 'stage') stages[cat.name]++;
@@ -1004,7 +1048,7 @@ export default function App() {
   const [year, setYear] = useState(today.getFullYear());
   const [month, setMonth] = useState(today.getMonth() + 1);
   const [selected, setSelected] = useState(fmtDate(today));
-  const [anim, setAnim] = useState('in');
+  const [slideDir, setSlideDir] = useState(0);
 
   const [input, setInput] = useState('');
   const [processing, setProcessing] = useState(false);
@@ -1014,6 +1058,11 @@ export default function App() {
   const inputRef = useRef(null);
 
   useEffect(() => { saveState(state); }, [state]);
+  useEffect(() => {
+    recordOpen();
+    // La transition de couleur du fond n'est activée qu'après le premier affichage
+    requestAnimationFrame(() => document.body.classList.add('ready'));
+  }, []);
 
   const lastSubmitRef = useRef(0);
 
@@ -1027,8 +1076,10 @@ export default function App() {
 
     setProcessing(true);
     setFeedback(null);
+    const t0 = performance.now();
     try {
       const result = await callAI(text, state.categories);
+      const tNet = performance.now();
       const { newState, changed } = applyActions(state, result.actions);
       setHistory(h => [{ prevState: state, instruction: text, feedback: result.feedback }, ...h].slice(0, 20));
       setState(newState);
@@ -1039,7 +1090,9 @@ export default function App() {
         setFeedback({ type: 'ok', text: (result.feedback || 'Mis à jour.') + ecoSuffix });
       }
       setInput('');
+      recordPhrase({ networkMs: Math.round(tNet - t0), timing: result.timing || null }, tNet);
     } catch (e) {
+      recordPhrase({ networkMs: Math.round(performance.now() - t0), error: true });
       setFeedback({ type: 'err', text: `Erreur : ${e.message}` });
     } finally {
       setProcessing(false);
@@ -1054,28 +1107,26 @@ export default function App() {
     setFeedback({ type: 'ok', text: 'Annulé.' });
   };
 
+  // Changement de mois immédiat (l'ancienne version attendait 120 ms avant de
+  // changer, puis rejouait 3 rendus complets). L'animation est jouée par le CSS.
   const animateMonthChange = (delta) => {
-    setAnim(delta > 0 ? 'out-left' : 'out-right');
-    setTimeout(() => {
-      let m = month + delta, y = year;
-      if (m < 1) { m = 12; y -= 1; }
-      if (m > 12) { m = 1; y += 1; }
-      setMonth(m); setYear(y);
-      if (isMobile) setSelected(`${y}-${pad(m)}-01`);
-      setAnim(delta > 0 ? 'out-right' : 'out-left');
-      requestAnimationFrame(() => setAnim('in'));
-    }, 120);
+    const t0 = performance.now();
+    let m = month + delta, y = year;
+    if (m < 1) { m = 12; y -= 1; }
+    if (m > 12) { m = 1; y += 1; }
+    setSlideDir(delta);
+    setMonth(m); setYear(y);
+    if (isMobile) setSelected(`${y}-${pad(m)}-01`);
+    recordMonthChange(t0);
   };
 
   const goToMonth = (y, m) => {
     if (y === year && m === month) return;
-    setAnim('out-left');
-    setTimeout(() => {
-      setYear(y); setMonth(m);
-      if (isMobile) setSelected(`${y}-${pad(m)}-01`);
-      setAnim('out-right');
-      requestAnimationFrame(() => setAnim('in'));
-    }, 120);
+    const t0 = performance.now();
+    setSlideDir(y * 12 + m > year * 12 + month ? 1 : -1);
+    setYear(y); setMonth(m);
+    if (isMobile) setSelected(`${y}-${pad(m)}-01`);
+    recordMonthChange(t0);
   };
 
   const swipeHandlers = useSwipe(
@@ -1084,6 +1135,7 @@ export default function App() {
   );
 
   const counts = useMemo(() => computeCounts(state, today), [state, today]);
+  const closeDetail = useCallback(() => setSelected(null), []);
 
   // Liste de mois à proposer dans le select (24 mois autour de l'année courante)
   const monthOptions = useMemo(() => {
@@ -1174,11 +1226,11 @@ export default function App() {
           )}
 
           <MonthGrid year={year} month={month} state={state} theme={theme}
-            isMobile={isMobile} selected={selected} setSelected={setSelected} anim={anim} />
+            isMobile={isMobile} selected={selected} setSelected={setSelected} slideDir={slideDir} />
 
           {selected && (
             <DayDetail dateStr={selected} state={state} theme={theme}
-              isMobile={isMobile} onClose={isMobile ? () => setSelected(null) : null} />
+              isMobile={isMobile} onClose={isMobile ? closeDetail : null} />
           )}
 
           {/* Compteur stages */}
