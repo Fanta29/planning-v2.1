@@ -3,6 +3,7 @@ import {
   ChevronLeft, ChevronRight, Send, Trash2, List, Loader2, RotateCcw, X,
   Settings as SettingsIcon, Sun, Moon, Monitor,
 } from 'lucide-react';
+import { loadState, saveState } from './lib/storage.js';
 
 // ============================================================
 // CONSTANTES
@@ -10,7 +11,6 @@ import {
 const FR_MONTHS = ["Janvier","Février","Mars","Avril","Mai","Juin","Juillet","Août","Septembre","Octobre","Novembre","Décembre"];
 const FR_DAYS_FULL = ["Lundi","Mardi","Mercredi","Jeudi","Vendredi","Samedi","Dimanche"];
 const FR_DAYS_SHORT = ["L","M","M","J","V","S","D"];
-const STORAGE_KEY = 'planning_state_v21';
 
 // ============================================================
 // THÈMES
@@ -997,13 +997,7 @@ function applyActions(state, actions) {
 // ============================================================
 export default function App() {
   const isMobile = useIsMobile();
-  const [state, setState] = useState(() => {
-    try {
-      const raw = localStorage.getItem(STORAGE_KEY);
-      if (raw) return { ...DEFAULT_STATE, ...JSON.parse(raw) };
-    } catch (e) {}
-    return DEFAULT_STATE;
-  });
+  const [state, setState] = useState(() => loadState(DEFAULT_STATE));
   const theme = useTheme(state.settings.theme);
   const [history, setHistory] = useState([]);
   const today = useMemo(() => new Date(), []);
@@ -1019,9 +1013,7 @@ export default function App() {
   const [showSettings, setShowSettings] = useState(false);
   const inputRef = useRef(null);
 
-  useEffect(() => {
-    try { localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); } catch (e) {}
-  }, [state]);
+  useEffect(() => { saveState(state); }, [state]);
 
   const lastSubmitRef = useRef(0);
 
