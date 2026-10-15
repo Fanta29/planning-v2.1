@@ -1,12 +1,15 @@
 // Fonction serverless Vercel — V2.2
 // - Modèle principal gemini-3.8-flash, réflexion au plus bas ("low" : "minimal" n'existe pas sur ce modèle)
-// - Secours automatique sur gemini-3.5-flash-lite (réflexion "minimal") si quota épuisé (429)
-//   ou modèle surchargé (503)
+// - Secours automatique sur gemini-3.5-flash-lite (réflexion "minimal") si quota épuisé (429),
+//   modèle surchargé (503) ou pas de réponse en 5 s
 // - Sortie structurée : JSON imposé par un schéma (responseJsonSchema)
 // Identifiants vérifiés sur ai.google.dev (docs models / pricing / thinking) le 2026-10-15.
 
 const PRIMARY = { model: 'gemini-3.8-flash', thinkingLevel: 'low' };
 const FALLBACK = { model: 'gemini-3.5-flash-lite', thinkingLevel: 'minimal' };
+// Le modèle principal peut mettre ~8 s à répondre « 503 surcharge » : au-delà de ce délai,
+// on abandonne et on bascule sur le secours au lieu de faire attendre l'utilisateur.
+const PRIMARY_TIMEOUT_MS = 5000;
 
 const WORK_REGULAR_SYNONYMS = [
   'travail', 'travailler', 'taf', 'taffer', 'taffe', 'boulot', 'bosser', 'job',
@@ -286,7 +289,7 @@ function normalizeAction(a) {
 let warm = false;
 
 // Appelle un modèle Gemini donné (clé passée en en-tête, jamais dans l'URL)
-async function callGemini({ model, thinkingLevel }, apiKey, systemPrompt, instruction) {
+async function callGemini({ model, thinkingLevel }, apiKey, systemPrompt, instruction, timeoutMs) {
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`;
   const body = {
     contents: [{ role: 'user', parts: [{ text: instruction }] }],
@@ -298,11 +301,21 @@ async function callGemini({ model, thinkingLevel }, apiKey, systemPrompt, instru
       thinkingConfig: { thinkingLevel },
     },
   };
-  return fetch(url, {
+  const opts = {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'x-goog-api-key': apiKey },
     body: JSON.stringify(body),
-  });
+  };
+  if (!timeoutMs) return fetch(url, opts);
+  try {
+    return await fetch(url, { ...opts, signal: AbortSignal.timeout(timeoutMs) });
+  } catch (e) {
+    // Délai dépassé : réponse factice 504 pour déclencher le secours
+    if (e.name === 'TimeoutError' || e.name === 'AbortError') {
+      return { status: 504, ok: false, text: async () => `délai de ${timeoutMs} ms dépassé` };
+    }
+    throw e;
+  }
 }
 
 export default async function handler(req, res) {
@@ -323,11 +336,11 @@ export default async function handler(req, res) {
   let usedFallback = false;
   const tGemini = Date.now();
   let primaryMs = 0;   // temps perdu sur le modèle principal avant de basculer
-  let r = await callGemini(PRIMARY, apiKey, systemPrompt, instruction);
+  let r = await callGemini(PRIMARY, apiKey, systemPrompt, instruction, PRIMARY_TIMEOUT_MS);
 
-  // 2. Quota épuisé (429) ou modèle surchargé (503) : secours automatique sur Flash-Lite
+  // 2. Quota épuisé (429), modèle surchargé (503) ou trop lent (504) : secours sur Flash-Lite
   let fallbackReason = null;
-  if (r.status === 429 || r.status === 503) {
+  if (r.status === 429 || r.status === 503 || r.status === 504) {
     usedFallback = true;
     const errTxt = await r.text();
     fallbackReason = `${r.status} ${errTxt.slice(0, 300)}`;
