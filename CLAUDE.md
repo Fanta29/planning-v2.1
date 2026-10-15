@@ -17,12 +17,36 @@ Lis ce fichier en entier avant toute modification.
 ## Règles de travail
 
 1. Ne jamais pousser sur `main`. Travailler sur la branche de développement (session
-   actuelle : `claude/planning-v2.2-lznwhf`). Vercel crée une URL de preview à chaque push ;
-   l'utilisateur teste sur iPhone. Fusion sur `main` uniquement sur demande explicite.
-2. Commits petits, un sujet par commit.
-3. Ne jamais casser les données existantes (clé localStorage `planning_state_v21`). Tout
+   actuelle : `claude/planning-v2.2-lznwhf`). Vercel crée une preview à chaque push ;
+   l'utilisateur teste sur iPhone.
+2. **Rien ne va en production sans que l'utilisateur dise « fusionne ».** On ne fusionne pas
+   étape par étape : une seule fusion, quand toute la V2.2 lui convient.
+3. Commits petits, un sujet par commit.
+4. Ne jamais casser les données existantes (clé localStorage `planning_state_v21`). Tout
    changement de format = migration qui conserve catégories, règles, exceptions, notes.
-4. S'arrêter après chaque étape : dire ce qui a été fait, l'URL de preview, quoi vérifier.
+5. S'arrêter après chaque étape : dire ce qui a été fait et quoi vérifier.
+6. **Vercel : faire soi-même toutes les vérifications et manipulations via le connecteur
+   Vercel** (variables d'environnement, déploiements, protection, logs). Ne demander à
+   l'utilisateur d'agir que pour ce qui se fait sur son iPhone.
+7. **Pour faire tester : donner directement un lien de partage de la preview** (outil
+   `get_access_to_vercel_url`, valable ~23 h ; les previews sont protégées par Vercel
+   Authentication). Adresse stable de la branche :
+   `planning-v2-1-git-claude-planning-v22-lznwhf-fanta29-s-projects.vercel.app`.
+   Projet Vercel : `planning-v2-1` (`prj_uI9E3wkpDEDsykDv48uKQQzbAHRC`). Ne pas passer
+   `teamId` aux outils Vercel : les appels sans `teamId` fonctionnent.
+8. La preview a une autre adresse que la production : elle ne voit pas les données de
+   l'utilisateur. Pour tester sur ses vraies données : export JSON depuis l'app habituelle,
+   import sur la preview (Réglages → Données).
+
+### Checklist avant fusion (à dérouler quand la V2.2 semble prête)
+
+1. Prévenir l'utilisateur que la V2.2 paraît prête.
+2. Confirmer, preuves à l'appui (tests), que ses données de production — catégories,
+   règles (avec exceptions), vacances, événements, notes, réglages — seront conservées.
+3. Lui faire tester la migration sur la preview avec ses vraies données importées.
+4. Lui rappeler de faire un **export de sauvegarde depuis son app habituelle juste avant
+   de fusionner**.
+5. Fusionner uniquement après son « fusionne ».
 
 ## Architecture (état V2.2 en cours)
 
@@ -32,6 +56,7 @@ src/main.jsx        point d'entrée React
 src/App.jsx         toute l'interface + logique calendrier + application des actions
 src/lib/storage.js  SEUL point de contact avec la persistance (localStorage aujourd'hui)
 src/lib/perf.js     mesures de vitesse en mémoire (Réglages → Diagnostic de vitesse)
+vercel.json         région des fonctions : cdg1 (Paris)
 vite.config.js      PWA : precache de l'app shell, AUCUN runtimeCaching
 ```
 
@@ -64,16 +89,24 @@ Modèle de données (`planning_state_v21`) :
 
 ## Avancement V2.2
 
-- [x] Étape 1 — Diagnostic de lenteur (voir ci-dessous).
-- [ ] Étape 2 — Modèle Gemini (principal `gemini-3.8-flash`, secours 429
-      `gemini-3.5-flash-lite` — identifiants à vérifier sur la doc officielle avant de coder),
-      sortie structurée JSON avec schéma, réflexion (« thinking ») minimale, indicateur
-      « ⚡ mode éco » conservé.
-- [ ] Étape 3 + 4 — Parser natif (actions, dates, heures, couleurs, types, fautes de frappe,
-      hors ligne) + tests Vitest écrits en premier, date de référence fixe.
+- [x] Étape 1 — Diagnostic de lenteur (voir ci-dessous). Fondu du changement de mois rétabli
+      en CSS (180 ms, sans délai, respecte « Réduire les animations »).
+- [x] Export / import JSON (Réglages → Données), logique dans `src/lib/storage.js`.
+- [x] Étape 2 — `gemini-3.8-flash` (thinkingLevel `low` : `minimal` n'existe pas sur ce
+      modèle), secours sur 429/503 `gemini-3.5-flash-lite` (thinkingLevel `minimal`),
+      `responseJsonSchema`, clé en en-tête, fonction en région `cdg1` (Paris).
+      Identifiants vérifiés le 2026-10-15 (ai.google.dev : models, pricing, thinking).
+      Quotas du free tier non publiés par modèle : à lire dans AI Studio.
+- [ ] Étape 3 + 4 — Parser natif dans **son propre fichier `src/lib/parser.js`** (séparé
+      d'App.jsx, testable seul) : actions, dates, heures, couleurs, types, fautes de frappe,
+      hors ligne. Tests Vitest écrits en premier, date de référence fixe.
 - [ ] Étape 5 — Interface : décompte global limité aux vacances, sélecteur de mois visiblement
       cliquable, résumé « ce que l'app a compris » + Annuler, journal local des phrases non
       comprises / passées par l'IA.
+
+Mesure iPhone avant étape 2 (gemini-2.5-flash, iad1) : 2,5 à 3,4 s par phrase, dont
+2,3 à 2,8 s dans Gemini (220 à 340 jetons de réflexion) ; ouverture 498 ms ; changement de
+mois 16 à 19 ms.
 
 ### Étape 1 — mesures (Chromium, profil iPhone, processeur ralenti ×4)
 
