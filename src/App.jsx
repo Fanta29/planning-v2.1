@@ -738,6 +738,7 @@ function DiagnosticSection({ theme }) {
         const parts = p.error ? ['erreur'] : [
           t && t.model && t.model.replace('gemini-', ''),
           t && `Gemini ${t.geminiMs} ms`,
+          t && t.fallbackStatus && `bascule après ${t.primaryFailMs} ms (erreur ${t.fallbackStatus})`,
           t && `serveur ${t.serverMs} ms`,
           t && t.thoughtsTokens > 0 && `${t.thoughtsTokens} jetons de réflexion`,
           t && t.cold && 'démarrage à froid',

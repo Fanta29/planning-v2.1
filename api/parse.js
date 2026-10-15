@@ -322,11 +322,19 @@ export default async function handler(req, res) {
   // 1. Tentative avec Flash (modèle principal)
   let usedFallback = false;
   const tGemini = Date.now();
+  let primaryMs = 0;   // temps perdu sur le modèle principal avant de basculer
   let r = await callGemini(PRIMARY, apiKey, systemPrompt, instruction);
 
   // 2. Quota épuisé (429) ou modèle surchargé (503) : secours automatique sur Flash-Lite
+  let fallbackReason = null;
   if (r.status === 429 || r.status === 503) {
     usedFallback = true;
+    const errTxt = await r.text();
+    fallbackReason = `${r.status} ${errTxt.slice(0, 300)}`;
+    // Visible dans Vercel → Logs : explique pourquoi le mode éco s'est déclenché
+    console.warn(`[parse] ${PRIMARY.model} indisponible, secours ${FALLBACK.model} : ${fallbackReason}`);
+    const tPrimaryFail = Date.now();
+    primaryMs = tPrimaryFail - tGemini;
     r = await callGemini(FALLBACK, apiKey, systemPrompt, instruction);
   }
 
@@ -336,7 +344,7 @@ export default async function handler(req, res) {
   }
 
   const data = await r.json();
-  const geminiMs = Date.now() - tGemini;
+  const geminiMs = Date.now() - tGemini - primaryMs;
   const text = data.candidates?.[0]?.content?.parts?.[0]?.text || '';
   const cleaned = text.replace(/```json|```/g, '').trim();
 
@@ -356,6 +364,8 @@ export default async function handler(req, res) {
     geminiMs,
     cold,
     model: (usedFallback ? FALLBACK : PRIMARY).model,
+    primaryFailMs: usedFallback ? primaryMs : 0,
+    fallbackStatus: usedFallback ? Number(fallbackReason.slice(0, 3)) : null,
     thoughtsTokens: data.usageMetadata?.thoughtsTokenCount || 0,
     promptTokens: data.usageMetadata?.promptTokenCount || 0,
   };
