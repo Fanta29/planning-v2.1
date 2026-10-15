@@ -70,8 +70,9 @@ phrase, les catégories, la date du jour) → Gemini renvoie `{ actions[], feedb
 
 Modèle de données (`planning_state_v21`) :
 - `categories[]` : `{ id, name, pillColor, cellColor, kind: work|vacation|neutral, subkind: stage|regular|garde|null }`
-- `recurringRules[]` : `{ id, categoryId, weekdays[0=lundi..6], startDate, endDate, exceptions[] }`
-- `events[]` : `{ id, categoryId, label, startDate, endDate }` (dates `AAAA-MM-JJ`, pas d'heure)
+- `recurringRules[]` : `{ id, categoryId, weekdays[0=lundi..6], startDate, endDate, exceptions[], pillColor?, cellColor? }`
+- `events[]` : `{ id, categoryId, label, startDate, endDate, pillColor?, cellColor? }` (dates
+  `AAAA-MM-JJ`, pas d'heure ; couleur facultative propre à l'événement)
 - `dayNotes[]` : `{ id, date, text }`
 - `backgrounds[]` : `{ id, color, weekdays[]|null, startDate, endDate, exceptions[] }` (fonds de
   case ; absent des anciennes données → liste vide)
@@ -95,15 +96,34 @@ Modèle de données (`planning_state_v21`) :
 - **Objectif** : le parser comprend tout ; l'IA ne sert qu'en tout dernier recours. Pour
   chaque nouveau type de phrase complexe : proposer d'abord les phrases et le résultat
   attendu sous forme de tests, les faire valider par l'utilisateur, puis coder.
-- **Couleurs** : une couleur donnée pour une catégorie existante ne modifie jamais la
-  catégorie ; l'événement est ajouté avec la couleur actuelle et l'app le signale en une
-  ligne (« Foot garde sa couleur verte »). Pas de changement de couleur pour l'instant
-  (« mets le stage en bleu » → message « pas encore possible »), ni par le parser ni par l'IA.
+- **Couleurs (règle définitive, pour toutes les catégories)** : chaque type d'événement garde
+  la couleur avec laquelle il a été créé ; sans couleur, un nouvel événement reprend cette
+  couleur. Une couleur donnée pour un type existant (« mercredi en rouge foot ») s'applique
+  uniquement à cet événement-là (champ `pillColor`/`cellColor` de l'événement ou de la règle) ;
+  elle ne modifie jamais le type, ni les événements déjà créés, ni les règles existantes.
+  Changer la couleur d'un type pour de bon (« mets le stage en bleu ») : message « Changer une
+  couleur n'est pas encore possible » (voir « Idées pour plus tard »). Vaut pour le parser
+  et pour l'IA.
+- **Le parser comprend toutes les façons naturelles de dire une même chose** : majuscules,
+  accents ou non, abréviations, tirets ou non (week-end / weekend / WE / w-e…).
+- **« sauf »** et équivalents (à part, a part, excepté, hormis, mis à part, en dehors de) :
+  dates, périodes, jours ou week-end exclus. Sur une règle existante identique, on ajoute
+  l'exception au lieu de créer une 2e règle.
+- **Jours** : « tous les jours » / « chaque jour » = 7 jours ; « en semaine » = lundi →
+  vendredi ; « tous les week-ends » = samedi + dimanche ; « sauf le week-end » (et variantes)
+  retire samedi et dimanche ; « du lundi au vendredi » = règle.
+- **« pas de foot le 23/10 »** : retire uniquement cette occurrence (exception sur la règle,
+  ou suppression de l'événement ponctuel) ; si rien ce jour-là, message.
+- **Plusieurs dates dans une phrase** : un événement par date ; « le 12 et le 13 » sans mois
+  = prochaine occurrence de ces jours (aujourd'hui inclus).
+- **« X en vacances »** : X inconnu, ou catégorie sans règle récurrente → question, rien
+  n'est retiré.
 - **Fond de case** : « en fond vert les lundis » colore le fond des cases des jours concernés
   (liste `backgrounds`), comme les vacances perso. Ce n'est ni une catégorie ni une pastille.
-- **Garde, astreinte** : travail (comptées, masquées pendant les vacances), sous-type
-  `garde` : les jours fériés ne sont PAS exclus (il y a des gardes les jours fériés).
-  Permanence et rotation restent neutres. « vacation pro » ≠ « vacances ».
+- **Garde, astreinte** : travail (décomptées), sous-type `garde`, mais ce sont des
+  exceptions : les vacances ne les suppriment pas et ne les masquent pas (elles restent
+  visibles et comptées), et elles ne sont pas exclues des jours fériés. Permanence et rotation
+  restent neutres. « vacation pro » ≠ « vacances ».
 - **Plage sans année** = période dont la fin n'est pas encore passée (validé).
 - **Mots du travail** (liste complète, identique dans `parser.js` et `api/parse.js`) :
   travail, travailler, taf, taffer, taffe, boulot, bosser, job, work, working, stage, internat,
@@ -155,8 +175,11 @@ Modèle de données (`planning_state_v21`) :
 - [x] Réglages : « Comprises sans IA : X % » et journal local des phrases passées par l'IA
       (clé `planning_journal_v1`, 200 max) avec « Copier la liste » : l'utilisateur l'envoie
       pour enrichir le parser.
-- [ ] Phrases complexes à faire comprendre au parser (tests à faire valider AVANT de coder) :
-      « sauf le … », plusieurs dates dans une phrase, personne inconnue « en vacances ».
+- [x] Phrases complexes (tests validés par l'utilisateur, puis codés) : « sauf » et
+      équivalents, plusieurs dates, « pas de … le … », « X en vacances » inconnu ou sans
+      règle, tous les jours / en semaine / week-ends. Couleur par événement. 114 tests.
+      Encore confiés à l'IA : « un vendredi sur deux », « semaines paires », exception sur une
+      date simple, suppression d'une récurrence entière par dates.
 - [ ] Branche `claude/export-production` (partie de `main`, bouton d'export seul, lecture
       seule) : **exception validée par l'utilisateur à la règle « une seule fusion »**.
       Ne la fusionner sur `main` qu'après son « fusionne l'export ».
