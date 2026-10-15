@@ -23,8 +23,15 @@
       #root { height: 100%; }
       * { -webkit-tap-highlight-color: transparent; }
       input, textarea { font-size: 16px; }
-      @keyframes slideFromRight { from { opacity: 0.4; transform: translateX(12px); } to { opacity: 1; transform: none; } }
-      @keyframes slideFromLeft { from { opacity: 0.4; transform: translateX(-12px); } to { opacity: 1; transform: none; } }
+      /* Changement de mois : le mois change immédiatement, puis le nouveau mois apparaît en fondu */
+      @keyframes monthFromRight { from { opacity: 0; transform: translateX(16px); } to { opacity: 1; transform: none; } }
+      @keyframes monthFromLeft { from { opacity: 0; transform: translateX(-16px); } to { opacity: 1; transform: none; } }
+      .month-in-right { animation: monthFromRight 0.18s ease-out; }
+      .month-in-left { animation: monthFromLeft 0.18s ease-out; }
+      /* Réglage iPhone « Réduire les animations » : pas de glissement ni de fondu */
+      @media (prefers-reduced-motion: reduce) {
+        .month-in-right, .month-in-left { animation: none; }
+      }
       @keyframes spin { to { transform: rotate(360deg); } }
       .animate-spin { animation: spin 1s linear infinite; }
     </style>

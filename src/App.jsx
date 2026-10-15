@@ -341,13 +341,12 @@ const MonthGrid = memo(function MonthGrid({ year, month, state, theme, isMobile,
   }, [year, month, state]);
   const DaysHeader = isMobile ? FR_DAYS_SHORT : FR_DAYS_FULL;
   return (
-    <div key={`${year}-${month}`} style={{
+    <div key={`${year}-${month}`} className={slideDir > 0 ? 'month-in-right' : slideDir < 0 ? 'month-in-left' : undefined} style={{
       background: theme.cardBg,
       border: isMobile ? 'none' : `1px solid ${theme.grid}`,
       borderRadius: isMobile ? 14 : 0,
       overflow: 'hidden',
       boxShadow: isMobile ? '0 1px 0 rgba(0,0,0,0.04)' : 'none',
-      animation: slideDir ? `${slideDir > 0 ? 'slideFromRight' : 'slideFromLeft'} 0.16s ease-out` : 'none',
     }}>
       <div style={{
         display: 'grid', gridTemplateColumns: 'repeat(7, 1fr)',
