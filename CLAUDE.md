@@ -107,9 +107,23 @@ Modèle de données (`planning_state_v21`) :
       vacances), « en fond vert les lundis » (demande une catégorie), « vert pastel » (mis en
       fond au lieu de la pastille), « décale le foot au jeudi », « garde le 12/11 » (rien).
       Dates sans année : l'IA met l'année courante même si la date est passée (07/10 → 2026).
-- [ ] Étape 3 + 4 — Parser natif dans **son propre fichier `src/lib/parser.js`** (séparé
-      d'App.jsx, testable seul) : actions, dates, heures, couleurs, types, fautes de frappe,
-      hors ligne. Tests Vitest écrits en premier, date de référence fixe.
+- [x] Étape 3 + 4 — Parser natif `src/lib/parser.js` (`interpret(texte, état, 'AAAA-MM-JJ')`
+      → ok / missing / ai), application des actions `src/lib/actions.js`, dates
+      `src/lib/dates.js`. Tests : `npm test` (Vitest, `src/lib/parser.test.js`, date fixe
+      jeudi 15/10/2026). **Lancer les tests à chaque modification du parser.**
+      Règles de dates : date sans année = prochaine occurrence (aujourd'hui inclus), sauf
+      suppression (vise l'événement existant) ; plage = celle dont la fin n'est pas passée ;
+      jour de semaine seul = un seul événement, le prochain, aujourd'hui inclus ; « tous les
+      / les mercredis » = règle. Les mêmes règles sont données à l'IA dans le prompt.
+      Hors ligne vérifié (ouverture + parser). En attente : **décision de l'utilisateur sur
+      le stockage des heures** (en attendant, l'heure est ajoutée au libellé des événements
+      ponctuels et non enregistrée pour les règles).
+- [x] IA en échec : principal, secours, puis principal retenté ; message simple côté app
+      (« Le service est surchargé… »), phrase gardée ; indicateur « ⚡ secours ».
+- [x] « Aujourd'hui : JJ/MM » cliquable (retour au mois en cours, jour sélectionné).
+- [ ] Branche `claude/export-production` (partie de `main`, bouton d'export seul, lecture
+      seule) : **exception validée par l'utilisateur à la règle « une seule fusion »**.
+      Ne la fusionner sur `main` qu'après son « fusionne l'export ».
 - [ ] Étape 5 — Interface : décompte global limité aux vacances, sélecteur de mois visiblement
       cliquable, résumé « ce que l'app a compris » + Annuler, journal local des phrases non
       comprises / passées par l'IA.
