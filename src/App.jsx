@@ -451,12 +451,9 @@ function ListSheet({ state, setState, theme, onClose, isMobile }) {
   const delEvent = (id) => setState(s => ({ ...s, events: s.events.filter(e => e.id !== id) }));
   const delRule = (id) => setState(s => ({ ...s, recurringRules: s.recurringRules.filter(r => r.id !== id) }));
   const delNote = (id) => setState(s => ({ ...s, dayNotes: s.dayNotes.filter(n => n.id !== id) }));
-  const content = (
-    <div style={{ padding: 20, fontSize: 13, color: theme.textPrimary }}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 18 }}>
-        <h3 style={{ fontSize: 17, fontWeight: 600, margin: 0 }}>Tout afficher</h3>
-        <button onClick={onClose} style={{ background: theme.gridLight, border: 'none', cursor: 'pointer', width: 30, height: 30, borderRadius: 15, display: 'grid', placeItems: 'center', color: theme.textSecondary }}><X size={16} /></button>
-      </div>
+  return (
+    <Panel theme={theme} isMobile={isMobile} title="Tout afficher" onClose={onClose} width={320}>
+    <div style={{ fontSize: 13, color: theme.textPrimary }}>
       <Section title={`Catégories (${state.categories.length})`} theme={theme}>
         {state.categories.length === 0 && <Empty theme={theme} />}
         {state.categories.map(c => {
@@ -509,24 +506,53 @@ function ListSheet({ state, setState, theme, onClose, isMobile }) {
         ))}
       </Section>
     </div>
+    </Panel>
+  );
+}
+
+// ============================================================
+// PANNEAU — feuille du bas sur mobile, colonne latérale sur ordinateur.
+// L'en-tête (poignée, titre, fermer) est fixe : seul le contenu défile,
+// en dessous, sans jamais passer sous le titre du mois.
+// ============================================================
+function Panel({ theme, isMobile, title, onClose, width, children }) {
+  const header = (
+    <div style={{ flexShrink: 0, padding: isMobile ? '0 20px 12px' : '20px 20px 12px', borderBottom: `1px solid ${theme.gridLight}` }}>
+      {isMobile && (
+        <div style={{ display: 'grid', placeItems: 'center', padding: '8px 0 10px' }}>
+          <div style={{ width: 36, height: 4, borderRadius: 2, background: theme.grid }} />
+        </div>
+      )}
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+        <h3 style={{ fontSize: 17, fontWeight: 600, margin: 0, color: theme.textPrimary }}>{title}</h3>
+        <button onClick={onClose} style={{ background: theme.gridLight, border: 'none', cursor: 'pointer', width: 30, height: 30, borderRadius: 15, display: 'grid', placeItems: 'center', color: theme.textSecondary }}><X size={16} /></button>
+      </div>
+    </div>
+  );
+  const body = (
+    <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', WebkitOverflowScrolling: 'touch', padding: '16px 20px', paddingBottom: isMobile ? 'calc(20px + env(safe-area-inset-bottom, 0px))' : 20 }}>
+      {children}
+    </div>
   );
   if (isMobile) {
     return (
       <div style={{ position: 'fixed', inset: 0, zIndex: 100, display: 'flex', alignItems: 'flex-end', background: 'rgba(0,0,0,0.35)' }} onClick={onClose}>
         <div onClick={e => e.stopPropagation()} style={{
           background: theme.cardBg, width: '100%', maxHeight: '85vh',
+          display: 'flex', flexDirection: 'column',
           borderTopLeftRadius: 16, borderTopRightRadius: 16,
-          overflowY: 'auto', paddingBottom: 'env(safe-area-inset-bottom, 20px)',
+          overflow: 'hidden', transform: 'translateZ(0)',  // force le découpage aux coins arrondis (Safari iOS)
         }}>
-          <div style={{ display: 'grid', placeItems: 'center', paddingTop: 8 }}>
-            <div style={{ width: 36, height: 4, borderRadius: 2, background: theme.grid }} />
-          </div>
-          {content}
+          {header}{body}
         </div>
       </div>
     );
   }
-  return <div style={{ width: 320, background: theme.cardBg, borderLeft: `1px solid ${theme.grid}`, overflowY: 'auto' }}>{content}</div>;
+  return (
+    <div style={{ width, background: theme.cardBg, borderLeft: `1px solid ${theme.grid}`, display: 'flex', flexDirection: 'column', minHeight: 0 }}>
+      {header}{body}
+    </div>
+  );
 }
 
 function Section({ title, children, theme }) {
@@ -564,12 +590,9 @@ function SettingsSheet({ state, setState, theme, onClose, isMobile, counts }) {
     setS({ vacationPeriod: { ...cur, ...partial } });
   };
 
-  const content = (
-    <div style={{ padding: 20, fontSize: 14, color: theme.textPrimary }}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 18 }}>
-        <h3 style={{ fontSize: 17, fontWeight: 600, margin: 0 }}>Réglages</h3>
-        <button onClick={onClose} style={{ background: theme.gridLight, border: 'none', cursor: 'pointer', width: 30, height: 30, borderRadius: 15, display: 'grid', placeItems: 'center', color: theme.textSecondary }}><X size={16} /></button>
-      </div>
+  return (
+    <Panel theme={theme} isMobile={isMobile} title="Réglages" onClose={onClose} width={360}>
+    <div style={{ fontSize: 14, color: theme.textPrimary }}>
 
       <Section title="Thème" theme={theme}>
         <SegmentedControl theme={theme} value={state.settings.theme} onChange={v => setS({ theme: v })}
@@ -646,24 +669,8 @@ function SettingsSheet({ state, setState, theme, onClose, isMobile, counts }) {
         }}>Tout effacer</button>
       </Section>
     </div>
+    </Panel>
   );
-  if (isMobile) {
-    return (
-      <div style={{ position: 'fixed', inset: 0, zIndex: 100, display: 'flex', alignItems: 'flex-end', background: 'rgba(0,0,0,0.35)' }} onClick={onClose}>
-        <div onClick={e => e.stopPropagation()} style={{
-          background: theme.cardBg, width: '100%', maxHeight: '85vh',
-          borderTopLeftRadius: 16, borderTopRightRadius: 16,
-          overflowY: 'auto', paddingBottom: 'env(safe-area-inset-bottom, 20px)',
-        }}>
-          <div style={{ display: 'grid', placeItems: 'center', paddingTop: 8 }}>
-            <div style={{ width: 36, height: 4, borderRadius: 2, background: theme.grid }} />
-          </div>
-          {content}
-        </div>
-      </div>
-    );
-  }
-  return <div style={{ width: 360, background: theme.cardBg, borderLeft: `1px solid ${theme.grid}`, overflowY: 'auto' }}>{content}</div>;
 }
 
 function DiagnosticSection({ theme }) {
