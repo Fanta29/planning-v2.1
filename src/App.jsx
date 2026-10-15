@@ -4,6 +4,9 @@ import {
   Settings as SettingsIcon, Sun, Moon, Monitor,
 } from 'lucide-react';
 import { loadState, saveState, exportState, parseImport } from './lib/storage.js';
+import { pad, fmtDate, parseDate, addDays, mondayIdx } from './lib/dates.js';
+import { applyActions } from './lib/actions.js';
+import { interpret } from './lib/parser.js';
 import { recordOpen, recordMonthChange, recordPhrase, getMeasures } from './lib/perf.js';
 
 // ============================================================
@@ -58,7 +61,6 @@ function easterDate(year) {
   const day = ((h + l - 7 * m + 114) % 31) + 1;
   return new Date(year, month - 1, day);
 }
-function addDays(d, n) { const r = new Date(d); r.setDate(r.getDate() + n); return r; }
 function holidaysForYear(year) {
   const e = easterDate(year);
   return {
@@ -83,11 +85,6 @@ function isHoliday(d) { return getHolidayName(d) !== null; }
 // ============================================================
 // HELPERS DATE
 // ============================================================
-const pad = n => String(n).padStart(2, '0');
-function fmtDate(d) { return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`; }
-function parseDate(s) { const [y,m,dd]=s.split('-').map(Number); return new Date(y,m-1,dd); }
-const mondayIdx = d => (d.getDay() + 6) % 7;
-const uid = (p) => `${p}_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
 
 function getMonthWeeks(year, month) {
   const lastDay = new Date(year, month, 0).getDate();
@@ -952,166 +949,6 @@ function friendlyError(e) {
 }
 
 // ============================================================
-// APPLICATION DES ACTIONS (avec nouvelle action add_exceptions_to_category)
-// ============================================================
-function applyActions(state, actions) {
-  let s = {
-    ...state,
-    categories: [...state.categories],
-    recurringRules: state.recurringRules.map(r => ({ ...r, exceptions: [...(r.exceptions || [])] })),
-    events: [...state.events],
-    dayNotes: [...state.dayNotes],
-  };
-  let changed = false;
-  const norm = str => (str || '').toLowerCase().trim();
-  const findCat = (name) => s.categories.find(c => norm(c.name) === norm(name));
-
-  for (const a of actions || []) {
-    switch (a.type) {
-      case 'create_category': {
-        const existing = findCat(a.name);
-        if (existing) {
-          if (a.pillColor !== undefined) existing.pillColor = a.pillColor;
-          if (a.cellColor !== undefined) existing.cellColor = a.cellColor;
-          if (a.kind !== undefined) existing.kind = a.kind;
-          if (a.subkind !== undefined) existing.subkind = a.subkind;
-        } else {
-          s.categories.push({
-            id: uid('cat'),
-            name: a.name,
-            pillColor: a.pillColor || null,
-            cellColor: a.cellColor || null,
-            kind: a.kind || 'neutral',
-            subkind: a.subkind || null,
-          });
-        }
-        changed = true;
-        break;
-      }
-      case 'update_category': {
-        const cat = findCat(a.name);
-        if (cat) {
-          if (a.pillColor !== undefined) cat.pillColor = a.pillColor;
-          if (a.cellColor !== undefined) cat.cellColor = a.cellColor;
-          if (a.kind !== undefined) cat.kind = a.kind;
-          if (a.subkind !== undefined) cat.subkind = a.subkind;
-          if (a.newName !== undefined) cat.name = a.newName;
-          changed = true;
-        }
-        break;
-      }
-      case 'delete_category': {
-        const cat = findCat(a.name);
-        if (cat) {
-          s.categories = s.categories.filter(c => c.id !== cat.id);
-          s.recurringRules = s.recurringRules.filter(r => r.categoryId !== cat.id);
-          s.events = s.events.filter(e => e.categoryId !== cat.id);
-          changed = true;
-        }
-        break;
-      }
-      case 'add_recurring': {
-        const cat = findCat(a.categoryName);
-        if (cat) {
-          s.recurringRules.push({
-            id: uid('rule'),
-            categoryId: cat.id,
-            weekdays: a.weekdays || [],
-            startDate: a.startDate || null,
-            endDate: a.endDate || null,
-            exceptions: a.exceptions || [],
-          });
-          changed = true;
-        }
-        break;
-      }
-      case 'add_exceptions_to_category': {
-        const cat = findCat(a.categoryName);
-        if (cat) {
-          const start = parseDate(a.start);
-          const end = parseDate(a.end);
-          const exceptions = [];
-          const it = new Date(start);
-          while (it <= end) { exceptions.push(fmtDate(it)); it.setDate(it.getDate() + 1); }
-          const rules = s.recurringRules.filter(r => r.categoryId === cat.id);
-          for (const r of rules) {
-            for (const ex of exceptions) {
-              if (!r.exceptions.includes(ex)) r.exceptions.push(ex);
-            }
-          }
-          if (rules.length > 0) changed = true;
-        }
-        break;
-      }
-      case 'remove_recurring': {
-        const cat = findCat(a.categoryName);
-        if (cat) {
-          const before = s.recurringRules.length;
-          s.recurringRules = s.recurringRules.filter(r => r.categoryId !== cat.id);
-          if (s.recurringRules.length !== before) changed = true;
-        }
-        break;
-      }
-      case 'add_event': {
-        let cat = findCat(a.categoryName);
-        if (!cat) {
-          cat = {
-            id: uid('cat'),
-            name: a.categoryName || 'Sans catégorie',
-            pillColor: '#007AFF',
-            cellColor: null,
-            kind: 'neutral',
-            subkind: null,
-          };
-          s.categories.push(cat);
-        }
-        s.events.push({
-          id: uid('evt'),
-          categoryId: cat.id,
-          label: a.label || a.categoryName,
-          startDate: a.startDate,
-          endDate: a.endDate || a.startDate,
-        });
-        changed = true;
-        break;
-      }
-      case 'remove_event': {
-        const before = s.events.length;
-        if (a.date) {
-          s.events = s.events.filter(e => !(
-            norm(e.label).includes(norm(a.label)) &&
-            a.date >= e.startDate && a.date <= (e.endDate || e.startDate)
-          ));
-        } else {
-          s.events = s.events.filter(e => !norm(e.label).includes(norm(a.label)));
-        }
-        if (s.events.length !== before) changed = true;
-        break;
-      }
-      case 'add_note': {
-        s.dayNotes.push({ id: uid('note'), date: a.date, text: a.text });
-        changed = true;
-        break;
-      }
-      case 'remove_note': {
-        const before = s.dayNotes.length;
-        s.dayNotes = s.dayNotes.filter(n => n.date !== a.date);
-        if (s.dayNotes.length !== before) changed = true;
-        break;
-      }
-      case 'update_settings': {
-        s.settings = { ...s.settings };
-        if (a.vacationPeriod !== undefined) s.settings.vacationPeriod = a.vacationPeriod;
-        if (a.theme !== undefined) s.settings.theme = a.theme;
-        changed = true;
-        break;
-      }
-    }
-  }
-  return { newState: s, changed };
-}
-
-// ============================================================
 // APP
 // ============================================================
 export default function App() {
@@ -1149,8 +986,34 @@ export default function App() {
     if (now - lastSubmitRef.current < 500) return;
     lastSubmitRef.current = now;
 
-    setProcessing(true);
     setFeedback(null);
+
+    // 1. Le code comprend d'abord (sans réseau, instantané)
+    const parsed = interpret(text, state, fmtDate(new Date()));
+    if (parsed.status === 'ok') {
+      const { newState, changed } = applyActions(state, parsed.actions);
+      if (changed) {
+        setHistory(h => [{ prevState: state, instruction: text, feedback: parsed.summary }, ...h].slice(0, 20));
+        setState(newState);
+        setFeedback({ type: 'ok', text: parsed.summary });
+        setInput('');
+      } else {
+        setFeedback({ type: 'err', text: 'Rien trouvé.' });
+      }
+      return;
+    }
+    if (parsed.status === 'missing') {
+      // Tout est compris mais il manque une pièce : on le dit, la phrase reste dans le champ
+      setFeedback({ type: 'err', text: parsed.message });
+      return;
+    }
+    // 2. Dernier recours : l'IA (impossible hors ligne)
+    if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+      setFeedback({ type: 'err', text: "Hors ligne, je ne comprends pas cette phrase : reformule-la plus simplement, ou réessaie avec du réseau." });
+      return;
+    }
+
+    setProcessing(true);
     const t0 = performance.now();
     try {
       const result = await callAI(text, state.categories);
