@@ -735,7 +735,7 @@ function DiagnosticSection({ theme }) {
       {m.phrase.length === 0 && row('Phrases envoyées', '—')}
       {m.phrase.map((p, i) => {
         const t = p.timing;
-        const parts = p.error ? ['erreur'] : [
+        const parts = p.error ? [p.code === 'overloaded' ? 'échec : service surchargé' : 'échec'] : [
           t && t.model && t.model.replace('gemini-', ''),
           t && `Gemini ${t.geminiMs} ms`,
           t && t.fallbackStatus && `bascule après ${t.primaryFailMs} ms (erreur ${t.fallbackStatus})`,
@@ -932,8 +932,23 @@ async function callAI(instruction, categories) {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ instruction, categories, today: fmtDate(new Date()) }),
   });
-  if (!r.ok) { const t = await r.text(); throw new Error(`HTTP ${r.status}: ${t}`); }
+  if (!r.ok) {
+    let body = null;
+    try { body = await r.json(); } catch (e) {}
+    const err = new Error((body && body.code) || `http_${r.status}`);
+    err.code = (body && body.code) || (r.status === 503 || r.status === 429 ? 'overloaded' : 'ai_error');
+    err.detail = body;
+    throw err;
+  }
   return r.json();
+}
+
+// Message simple pour l'utilisateur ; jamais d'erreur technique à l'écran.
+function friendlyError(e) {
+  if (typeof navigator !== 'undefined' && navigator.onLine === false) return "Pas de connexion : réessaie quand le réseau revient.";
+  if (e && e.code === 'overloaded') return 'Le service est surchargé, réessaie dans un instant.';
+  if (e instanceof TypeError) return "Pas de connexion : réessaie quand le réseau revient.";   // échec réseau de fetch
+  return "L'IA n'a pas pu répondre. Réessaie dans un instant.";
 }
 
 // ============================================================
@@ -1143,7 +1158,7 @@ export default function App() {
       const { newState, changed } = applyActions(state, result.actions);
       setHistory(h => [{ prevState: state, instruction: text, feedback: result.feedback }, ...h].slice(0, 20));
       setState(newState);
-      const ecoSuffix = result.usedFallback ? ' · ⚡ mode éco' : '';
+      const ecoSuffix = result.usedFallback ? ' · ⚡ secours' : '';
       if (!changed && (!result.actions || result.actions.length === 0)) {
         setFeedback({ type: 'err', text: (result.feedback || 'Rien trouvé.') + ecoSuffix });
       } else {
@@ -1152,8 +1167,9 @@ export default function App() {
       setInput('');
       recordPhrase({ networkMs: Math.round(tNet - t0), timing: result.timing || null }, tNet);
     } catch (e) {
-      recordPhrase({ networkMs: Math.round(performance.now() - t0), error: true });
-      setFeedback({ type: 'err', text: `Erreur : ${e.message}` });
+      // La phrase reste dans le champ : il suffit de renvoyer.
+      recordPhrase({ networkMs: Math.round(performance.now() - t0), error: true, code: e && e.code });
+      setFeedback({ type: 'err', text: friendlyError(e) });
     } finally {
       setProcessing(false);
     }
