@@ -224,10 +224,17 @@ function getDayContent(date, currentMonth, state, catById = buildCatMap(state)) 
   }
 
   // RÈGLE V2.1 : si une catégorie "vacation" est active ce jour,
-  // on masque toutes les catégories "work" (stages + regular)
+  // on masque les catégories "work" (stages + regular) — sauf gardes / astreintes,
+  // que les vacances ne suppriment pas
   const hasVacation = activeCategories.some(ac => ac.category.kind === 'vacation');
   if (hasVacation) {
-    activeCategories = activeCategories.filter(ac => ac.category.kind !== 'work');
+    activeCategories = activeCategories.filter(ac => ac.category.kind !== 'work' || ac.category.subkind === 'garde');
+  }
+  // Couleur effective : celle propre à l'événement ou à la règle, sinon celle du type
+  for (const ac of activeCategories) {
+    const own = ac.event || ac.rule || {};
+    ac.pill = own.pillColor || ac.category.pillColor || null;
+    ac.cell = own.cellColor || ac.category.cellColor || null;
   }
 
   // RÈGLE V2.1.1 : les jours hors du mois courant n'affichent aucune catégorie
@@ -248,8 +255,8 @@ function getDayContent(date, currentMonth, state, catById = buildCatMap(state)) 
 function resolveCellBackground(c, theme) {
   if (!c.inMonth) return theme.cellOtherMonth;
   if (c.holiday) return theme.cellHoliday;
-  const withCell = c.activeCategories.find(ac => ac.category.cellColor);
-  if (withCell) return withCell.category.cellColor;
+  const withCell = c.activeCategories.find(ac => ac.cell);
+  if (withCell) return withCell.cell;
   if (c.background) return c.background;
   if (c.isSun) return theme.cellSunday;
   if (c.isSat) return theme.cellSaturday;
@@ -261,7 +268,7 @@ function resolveCellBackground(c, theme) {
 // ============================================================
 function DesktopDayCell({ date, c, theme, onTap }) {
   const bg = resolveCellBackground(c, theme);
-  const pills = c.activeCategories.filter(ac => ac.category.pillColor);
+  const pills = c.activeCategories.filter(ac => ac.pill);
   const vacationLabel = c.activeCategories.find(ac => ac.category.kind === 'vacation' && ac.source === 'event');
   return (
     <div onClick={onTap} style={{
@@ -285,8 +292,8 @@ function DesktopDayCell({ date, c, theme, onTap }) {
           const label = ac.event ? ac.event.label : ac.category.name;
           return (
             <span key={i} style={{
-              border: `1px solid ${ac.category.pillColor}`,
-              color: ac.category.pillColor,
+              border: `1px solid ${ac.pill}`,
+              color: ac.pill,
               borderRadius: 999, padding: '1px 7px',
               fontSize: 10, fontWeight: 700,
               alignSelf: 'flex-start', maxWidth: '100%',
@@ -308,7 +315,7 @@ function DesktopDayCell({ date, c, theme, onTap }) {
 
 function MobileDayCell({ date, c, theme, isSelected, onTap }) {
   const bg = resolveCellBackground(c, theme);
-  const dots = c.activeCategories.map(ac => ac.category.pillColor || ac.category.cellColor).filter(Boolean).slice(0, 4);
+  const dots = c.activeCategories.map(ac => ac.pill || ac.cell).filter(Boolean).slice(0, 4);
   return (
     <button onClick={onTap} style={{
       background: bg, border: 'none',
@@ -415,7 +422,7 @@ const DayDetail = memo(function DayDetail({ dateStr, state, theme, isMobile, onC
           <DetailRow
             key={i}
             theme={theme}
-            color={ac.category.pillColor || ac.category.cellColor || theme.accent}
+            color={ac.pill || ac.cell || theme.accent}
             label={ac.event ? ac.event.label : ac.category.name}
             sub={subLabel}
           />
@@ -483,7 +490,7 @@ function ListSheet({ state, setState, theme, onClose, isMobile }) {
           const days = r.weekdays.map(w => FR_DAYS_FULL[w].toLowerCase()).join(', ');
           return (
             <ListRow key={r.id} theme={theme}
-              dot={cat.pillColor || cat.cellColor || theme.accent}
+              dot={r.pillColor || r.cellColor || cat.pillColor || cat.cellColor || theme.accent}
               label={cat.name}
               sub={`${days}${r.endDate ? ` jusqu'au ${fmtFr(r.endDate)}` : ''}${r.exceptions && r.exceptions.length ? ` · ${r.exceptions.length} exception(s)` : ''}`}
               onDelete={() => delRule(r.id)} />
@@ -496,7 +503,7 @@ function ListSheet({ state, setState, theme, onClose, isMobile }) {
           const cat = state.categories.find(c => c.id === e.categoryId);
           return (
             <ListRow key={e.id} theme={theme}
-              dot={cat ? (cat.pillColor || cat.cellColor || theme.accent) : theme.accent}
+              dot={e.pillColor || e.cellColor || (cat ? (cat.pillColor || cat.cellColor || theme.accent) : theme.accent)}
               ring={cat && cat.cellColor && !cat.pillColor ? theme.textSecondary : null}
               label={e.label}
               sub={`${fmtFr(e.startDate)}${e.endDate && e.endDate !== e.startDate ? ` → ${fmtFr(e.endDate)}` : ''}`}
@@ -968,13 +975,13 @@ function computeCounts(state, refDate) {
     const ds = fmtDate(it);
     const hol = isHoliday(it);
 
-    // Si l'utilisateur est en vacances ce jour, on ne compte pas
+    // Si l'utilisateur est en vacances ce jour, on ne compte pas (sauf gardes / astreintes)
     const inVac = vacEvents.some(e => ds >= e.startDate && ds <= (e.endDate || e.startDate));
 
-    if (!inVac) {
+    {
       for (const { cat, rules, events } of workCats) {
-        // Jours fériés : pas comptés, sauf pour les gardes / astreintes
-        if (hol && cat.subkind !== 'garde') continue;
+        // Vacances et jours fériés : pas comptés, sauf pour les gardes / astreintes
+        if ((hol || inVac) && cat.subkind !== 'garde') continue;
         // 1. Vérifier les règles récurrentes
         let active = false;
         for (const r of rules) {
