@@ -12,6 +12,7 @@
 //   { status: 'ai',      intent, reason }            → confier la phrase à l'IA
 // ============================================================
 import { fmtDate, parseDate, addDays, mondayIdx } from './dates.js';
+import { daysBetween, ruleActiveOn } from './actions.js';
 
 // ---------- normalisation ----------
 export const norm = s => (s || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase();
@@ -89,7 +90,7 @@ const FILLERS = new Set(['je', "j'", "j'ai", 'ai', 'moi', 'me', "m'", 'mets-moi'
 const ALWAYS_DROP = new Set(["j'ai", 'jai', 'finalement', 'prevu', 'prevue', 'prevus', 'prevues', 'svp', 'stp']);
 
 // Mots qui changent le sens d'une manière que le parser ne gère pas → IA
-const AI_WORDS = new Set(['sauf', 'excepte', 'hormis', 'paire', 'paires', 'pairs', 'impaire', 'impaires', 'impairs',
+const AI_WORDS = new Set(['paire', 'paires', 'pairs', 'impaire', 'impaires', 'impairs',
   'ou', 'puis', 'ensuite', 'entre', 'avant', 'apres', 'si', 'quand', 'lorsque', 'sinon', 'alternance', 'chaque']);
 
 const NUMBER_WORDS = { un: 1, une: 1, deux: 2, trois: 3, quatre: 4, cinq: 5, six: 6, sept: 7, huit: 8, neuf: 9, dix: 10 };
@@ -156,7 +157,56 @@ function tokenize(text) {
 // ============================================================
 // ANALYSE
 // ============================================================
+// « sauf » et ses équivalents : la phrase est coupée en deux, la partie après le mot
+// donne les exceptions (dates, période, jours de la semaine, week-end).
+const WEEKEND_WORDS = ['week-end', 'week-ends', 'weekend', 'weekends', 'we', 'w-e', 'wk', 'wkd'];
+function findExceptWord(toks) {
+  for (let i = 0; i < toks.length; i++) {
+    const w = toks[i].n, nx = toks[i + 1]?.n, nx2 = toks[i + 2]?.n;
+    if (w === 'sauf' || w === 'hormis' || /^excepte[es]{0,2}$/.test(w)) return { at: i, len: 1 };
+    if (w === 'mis' && nx === 'a' && nx2 === 'part') return { at: i, len: 3 };
+    if (w === 'a' && nx === 'part') return { at: i, len: 2 };
+    if (w === 'en' && nx === 'dehors' && ['de', 'du', "d'", 'des'].includes(nx2)) return { at: i, len: 2 };
+  }
+  return null;
+}
+
 export function parsePhrase(text, todayStr) {
+  const toks = tokenize(text);
+  const ex = findExceptWord(toks);
+  if (!ex) return parseMain(text, todayStr);
+  const main = toks.slice(0, ex.at).map(t => t.raw).join(' ');
+  const rest = toks.slice(ex.at + ex.len).map(t => t.raw).join(' ');
+  const intent = parseMain(main, todayStr);
+  intent.except = parseExcept(rest, todayStr);
+  return intent;
+}
+
+// Partie « sauf … » : jours de la semaine (« le mercredi », « le week-end ») et/ou dates
+function parseExcept(text, todayStr) {
+  const toks = tokenize(text);
+  const weekdays = new Set();
+  const rest = [];
+  for (let i = 0; i < toks.length; i++) {
+    const w = toks[i].n;
+    if (WEEKEND_WORDS.includes(w)) { weekdays.add(5); weekdays.add(6); continue; }
+    const base = w.endsWith('s') && w.slice(0, -1) in WEEKDAYS ? w.slice(0, -1) : w;
+    if (base in WEEKDAYS) { weekdays.add(WEEKDAYS[base]); continue; }
+    rest.push(toks[i].raw);
+  }
+  const r = rest.length ? parseMain(rest.join(' '), todayStr) : null;
+  const items = !r || !r.date ? [] : r.date.type === 'multiple' ? r.date.items : [r.date];
+  const dates = [];
+  for (const it of items) {
+    if (it.type === 'single') dates.push(it.date);
+    else if (it.type === 'range') {
+      for (let d = parseDate(it.start); fmtDate(d) <= it.end; d = addDays(d, 1)) dates.push(fmtDate(d));
+    }
+  }
+  return { weekdays: [...weekdays].sort(), dates: [...new Set(dates)].sort(), empty: !weekdays.size && !dates.length };
+}
+
+function parseMain(text, todayStr) {
   const today = parseDate(todayStr);
   const toks = tokenize(text);
   const intent = {
@@ -242,7 +292,7 @@ export function parsePhrase(text, todayStr) {
     if (a.m === null) a.m = b.m;
     if (sep === 'u') intent.confidence = 'medium';
     use(i, ...Array.from({ length: a.len }, (_, k) => i + 1 + k), j, ...Array.from({ length: b.len }, (_, k) => j + 1 + k));
-    dateSpecs.push({ type: 'range', a, b });
+    dateSpecs.push({ type: 'range', a, b, pos: i });
   }
 
   // 2b. jours de la semaine
@@ -253,6 +303,32 @@ export function parsePhrase(text, todayStr) {
     return null;
   };
   const recurringDays = [];
+  for (let i = 0; i < toks.length; i++) {
+    const w = at(i);
+    if (!w) continue;
+    // « tous les jours », « chaque jour »
+    if ((w === 'jours' && at(i - 1) === 'les' && at(i - 2) === 'tous') || (w === 'jour' && at(i - 1) === 'chaque')) {
+      recurringDays.push(0, 1, 2, 3, 4, 5, 6);
+      use(i, i - 1); if (w === 'jours') use(i - 2);
+      continue;
+    }
+    // « en semaine »
+    if (w === 'semaine' && at(i - 1) === 'en' && at(i + 1) !== 'prochaine') { recurringDays.push(0, 1, 2, 3, 4); use(i, i - 1); continue; }
+    // « tous les week-ends », « les week-ends », « chaque week-end »
+    if (WEEKEND_WORDS.includes(w) && (/s$/.test(w) || at(i - 1) === 'chaque' || (at(i - 1) === 'les'))) {
+      recurringDays.push(5, 6);
+      use(i); if (at(i - 1) === 'les' || at(i - 1) === 'chaque') use(i - 1); if (at(i - 2) === 'tous') use(i - 2);
+      continue;
+    }
+    // « du lundi au vendredi », « de lundi à vendredi »
+    if ((w === 'du' || w === 'de') && weekdayOf(at(i + 1)) && ['au', 'a'].includes(at(i + 2)) && weekdayOf(at(i + 3))) {
+      const a = weekdayOf(at(i + 1)).wd, b = weekdayOf(at(i + 3)).wd;
+      for (let d = a; ; d = (d + 1) % 7) { recurringDays.push(d); if (d === b) break; }
+      use(i, i + 1, i + 2, i + 3);
+      if (at(i - 1) === 'jours' && at(i - 2) === 'les' && at(i - 3) === 'tous') use(i - 1, i - 2, i - 3);
+      continue;
+    }
+  }
   for (let i = 0; i < toks.length; i++) {
     const wk = weekdayOf(at(i));
     if (!wk) continue;
@@ -274,7 +350,7 @@ export function parsePhrase(text, todayStr) {
     if (next) use(i + 1);
     if (before === 'ce') use(i - 1);
     // « décale le foot au jeudi » : on garde aussi le jour visé
-    dateSpecs.push({ type: 'single', date: fmtDate(addDays(today, delta)), weekday: wk.wd });
+    dateSpecs.push({ type: 'single', date: fmtDate(addDays(today, delta)), weekday: wk.wd, pos: i });
   }
   // « les lundis et jeudis » : « et » entre deux jours récurrents
   if (recurringDays.length) {
@@ -322,7 +398,24 @@ export function parsePhrase(text, todayStr) {
     if (!dt) continue;
     use(...Array.from({ length: dt.len }, (_, k) => i + k));
     if (at(i - 1) === 'le' || at(i - 1) === 'pour') use(i - 1);
-    dateSpecs.push({ type: 'single', raw: dt });
+    dateSpecs.push({ type: 'single', raw: dt, pos: i });
+  }
+  // Jours sans mois dans une énumération : « les 28 mai, 4, 10 et 11 juin », « le 12 et le 13 »
+  for (let i = 0; i < toks.length; i++) {
+    const w = at(i);
+    const m = w && /^(\d{1,2})(er)?$/.exec(w);
+    if (!m || +m[1] < 1 || +m[1] > 31) continue;
+    const prev = toks[i - 1];
+    const prevOk = prev && (['le', 'les', 'et'].includes(prev.n) || (prev.used && (/^\d/.test(prev.n) || MONTHS[prev.n])));
+    if (!prevOk) continue;
+    use(i);
+    if (prev && !prev.used && (prev.n === 'le' || prev.n === 'les')) prev.used = true;
+    // mois : celui de la date explicite suivante, sinon de la précédente, sinon aucun
+    const withMonth = dateSpecs.filter(sp => sp.raw && sp.raw.m);
+    const nextSp = withMonth.filter(sp => sp.pos > i).sort((a, b) => a.pos - b.pos)[0];
+    const prevSp = withMonth.filter(sp => sp.pos < i).sort((a, b) => b.pos - a.pos)[0];
+    const ref = nextSp || prevSp;
+    dateSpecs.push({ type: 'single', raw: { d: +m[1], m: ref ? ref.raw.m : null, y: ref ? ref.raw.y : null }, pos: i });
   }
   // « inscription le » : un « le » final sans date
   if (at(toks.length - 1) === 'le') use(toks.length - 1);
@@ -373,6 +466,10 @@ export function parsePhrase(text, todayStr) {
     else if (ADD_VERBS.includes(base)) { if (!verb) verb = 'add'; }
     else continue;
     use(i);
+  }
+  // « pas de foot le 23/10 », « pas d'astreinte samedi » : retirer cette occurrence
+  for (let i = 0; i < toks.length; i++) {
+    if (at(i) === 'pas' && (at(i + 1) === 'de' || at(i + 1) === "d'")) { verb = verb && verb !== 'remove' ? 'conflict' : 'remove'; use(i, i + 1); }
   }
   if (verb === 'conflict') intent.aiReason = 'actions contradictoires';
 
@@ -427,6 +524,7 @@ export function parsePhrase(text, todayStr) {
   // --- 8. mots non gérés qui changent le sens → IA ---
   const aiWord = leftover.find(w => AI_WORDS.has(w));
   if (aiWord) intent.aiReason = `mot « ${aiWord} »`;
+  if (/\bsur (deux|2|trois|3)\b/.test(leftover.join(' ')) || toks.some((t, i) => t.n === 'sur' && /^(deux|2|trois|3)$/.test(toks[i + 1]?.n || ''))) intent.aiReason = 'fréquence (un sur deux)';
   if (words.length > 8) intent.aiReason = 'phrase longue';
 
   // --- 9. résolution des dates (années) ---
@@ -476,9 +574,29 @@ function resolveDates(specs, recurringDays, today, isRemove) {
     return { range: next, candidates: cands };
   };
 
-  const singles = specs.filter(s => s.type === 'single');
+  // Jour sans mois (« le 12 ») : prochaine occurrence de ce jour du mois, aujourd'hui inclus
+  const nextDayOfMonth = d => {
+    for (let k = 0; k < 13; k++) {
+      const x = new Date(y0, today.getMonth() + k, 1);
+      if (dateOk(x.getFullYear(), x.getMonth() + 1, d)) {
+        const s = ymd(x.getFullYear(), x.getMonth() + 1, d);
+        if (s >= todayStr) return s;
+      }
+    }
+    return null;
+  };
+  const singles = specs.filter(s => s.type === 'single').sort((a, b) => (a.pos ?? 0) - (b.pos ?? 0));
   const ranges = specs.filter(s => s.type === 'range');
-  if (singles.length + ranges.length > 1) return { error: 'plusieurs dates', date: null };
+  if (!recurringDays.length && singles.length + ranges.length > 1) {
+    const items = [...singles, ...ranges].sort((a, b) => (a.pos ?? 0) - (b.pos ?? 0)).map(sp => {
+      if (sp.type === 'range') return sp.start ? { type: 'range', start: sp.start, end: sp.end } : (r => r && { type: 'range', ...r })(rangeOf(sp.a, sp.b).range);
+      if (sp.date) return { type: 'single', date: sp.date };
+      const d = sp.raw.m ? nextSingle(sp.raw).date : nextDayOfMonth(sp.raw.d);
+      return d && { type: 'single', date: d };
+    });
+    if (items.some(x => !x)) return { error: 'date invalide', date: null };
+    return { date: { type: 'multiple', items } };
+  }
 
   if (recurringDays.length) {
     const date = { type: 'recurring', weekdays: [...new Set(recurringDays)].sort() };
@@ -497,6 +615,10 @@ function resolveDates(specs, recurringDays, today, isRemove) {
   }
   if (singles[0]) {
     if (singles[0].date) return { date: { type: 'single', date: singles[0].date } };
+    if (!singles[0].raw.m) {
+      const d = nextDayOfMonth(singles[0].raw.d);
+      return d ? { date: { type: 'single', date: d } } : { error: 'date invalide', date: null };
+    }
     const s = nextSingle(singles[0].raw);
     if (!s.date) return { error: 'date invalide', date: null };
     return { date: { type: 'single', date: s.date }, candidates: isRemove ? s.candidates.map(d => ({ type: 'single', date: d })) : null };
@@ -516,8 +638,12 @@ export function describeDate(date) {
   if (!date) return '';
   if (date.type === 'single') return frDate(date.date);
   if (date.type === 'range') return `du ${frDate(date.start)} au ${frDate(date.end)}`;
-  const days = date.weekdays.map(w => WEEKDAY_NAMES[w]).join(' et ');
-  return `chaque ${days}` + (date.start ? ` du ${frDate(date.start)} au ${frDate(date.end)}` : '');
+  if (date.type === 'multiple') return date.items.map(describeDate).join(', ').replace(/, ([^,]*)$/, ' et $1');
+  const w = date.weekdays.join(',');
+  const days = w === '0,1,2,3,4,5,6' ? 'tous les jours' : w === '0,1,2,3,4' ? 'en semaine (du lundi au vendredi)'
+    : w === '5,6' ? 'chaque week-end'
+    : 'chaque ' + date.weekdays.map(x => WEEKDAY_NAMES[x]).join(', ').replace(/, ([^,]*)$/, ' et $1');
+  return days + (date.start ? ` du ${frDate(date.start)} au ${frDate(date.end)}` : '');
 }
 const colorLabel = c => c ? `${c.target === 'cell' ? 'fond ' : ''}${c.name}${c.shade ? ' ' + ({ fonce: 'foncé' }[c.shade] || c.shade) : ''}` : '';
 
@@ -571,6 +697,28 @@ function findCategory(state, label) {
     || null;
 }
 const overlaps = (e, start, end) => (e.endDate || e.startDate) >= start && e.startDate <= end;
+const itemsOf = date => !date ? [] : date.type === 'multiple' ? date.items : [date];
+const startOf = d => d.start || d.date;
+const endOf = d => d.end || d.date;
+// Le type (catégorie) a-t-il une occurrence sur la période : événement ou règle ?
+function occurs(state, ids, start, end) {
+  if ((state.events || []).some(e => ids.includes(e.categoryId) && overlaps(e, start, end))) return true;
+  const rules = (state.recurringRules || []).filter(r => ids.includes(r.categoryId));
+  if (!rules.length) return false;
+  return daysBetween(start, end).some(ds => rules.some(r => ruleActiveOn(r, ds) && !(r.exceptions || []).includes(ds)));
+}
+// Période moins des jours exclus → sous-périodes
+function splitRange(start, end, excluded) {
+  const out = [];
+  let cur = null;
+  for (const ds of daysBetween(start, end)) {
+    if (excluded(ds)) { if (cur) { out.push(cur); cur = null; } continue; }
+    if (!cur) cur = { start: ds, end: ds }; else cur.end = ds;
+  }
+  if (cur) out.push(cur);
+  return out;
+}
+const sameDays = (a, b) => a.length === b.length && a.every((x, i) => x === b[i]);
 
 export function interpret(text, state, todayStr) {
   const intent = parsePhrase(text || '', todayStr);
@@ -587,12 +735,16 @@ export function interpret(text, state, todayStr) {
     }
   }
 
-  const { date, color, label, kind } = intent;
+  // « sauf » sans rien derrière : on demande
+  if (intent.except && intent.except.empty) return out('missing', { message: 'Sauf quand ?' });
+
+  const { color, label, kind } = intent;
   const vacCat = (state.categories || []).find(c => c.kind === 'vacation');
 
-  // ---------- SUPPRESSION ----------
+  // ---------- SUPPRESSION (dont « pas de foot le 23/10 ») ----------
   if (intent.action === 'remove') {
     let target = null, targetKind = null;
+    const date = intent.date;
     if (kind === 'vacation') targetKind = 'vacation';
     else {
       target = findCategory(state, label);
@@ -600,7 +752,7 @@ export function interpret(text, state, todayStr) {
       if (!target && label && date && date.type !== 'recurring' && vacCat) {
         const short = norm(label).split(' ').find(w => w.length <= 3 && VACATION_WORDS.some(v => editDistance(w, v, 1) <= 1));
         const cands = intent._candidates || [date];
-        const hit = cands.find(c => (state.events || []).some(e => e.categoryId === vacCat.id && overlaps(e, c.start || c.date, c.end || c.date)));
+        const hit = cands.find(c => (state.events || []).some(e => e.categoryId === vacCat.id && overlaps(e, startOf(c), endOf(c))));
         if (short && hit) { targetKind = 'vacation'; intent.kind = 'vacation'; intent.confidence = 'medium'; if (hit !== date) intent.date = hit; }
       }
     }
@@ -609,26 +761,41 @@ export function interpret(text, state, todayStr) {
       return out('ai', { reason: 'cible de suppression inconnue' });
     }
     const ids = targetKind ? (state.categories || []).filter(c => c.kind === targetKind).map(c => c.id) : [target.id];
+    const name = targetKind ? 'vacances' : target.name;
     if (!intent.date) {
       if (target) return out('ok', { actions: [{ type: 'delete_category', name: target.name }], summary: `Supprimé : ${target.name} (tout)` });
       return out('missing', { message: 'Quelles dates retirer ?' });
     }
-    // année : celle où un événement existant correspond
-    const cands = intent._candidates || [intent.date];
-    const pick = cands.find(c => (state.events || []).some(e => ids.includes(e.categoryId) && overlaps(e, c.start || c.date, c.end || c.date))) || intent.date;
-    intent.date = pick;
-    const start = pick.start || pick.date, end = pick.end || pick.date;
-    const action = targetKind ? { type: 'remove_range', kind: targetKind, start, end } : { type: 'remove_range', categoryName: target.name, start, end };
-    return out('ok', { actions: [action], summary: `Retiré : ${targetKind ? 'vacances' : target.name}, ${describeDate(pick)}` });
+    if (intent.date.type === 'recurring') return out('ai', { reason: 'suppression récurrente' });
+    // année : celle où une occurrence existe (événement ou règle)
+    let items;
+    if (intent.date.type === 'multiple') items = intent.date.items;
+    else {
+      // Autre année seulement pour retrouver un événement existant ; une règle : prochaine occurrence
+      const cands = intent._candidates || [intent.date];
+      const evHit = cands.find(c => (state.events || []).some(e => ids.includes(e.categoryId) && overlaps(e, startOf(c), endOf(c))));
+      items = [evHit || intent.date];
+      intent.date = items[0];
+    }
+    const found = items.filter(it => occurs(state, ids, startOf(it), endOf(it)));
+    if (!found.length) {
+      const d = items.length === 1 ? describeDate(items[0]) : describeDate(intent.date);
+      return out('missing', { message: `Il n'y a pas de ${name} ${d.startsWith('du ') ? d : 'le ' + d} : rien n'a été retiré.` });
+    }
+    const actions = found.map(it => targetKind
+      ? { type: 'remove_range', kind: targetKind, start: startOf(it), end: endOf(it) }
+      : { type: 'remove_range', categoryName: target.name, start: startOf(it), end: endOf(it) });
+    return out('ok', { actions, summary: `Retiré : ${name}, ${describeDate(found.length === 1 ? found[0] : { type: 'multiple', items: found })}` });
   }
 
   // ---------- MODIFICATION ----------
   if (intent.action === 'modify') {
+    const date = intent.date;
     const cat = findCategory(state, label);
     if (!label) return out('missing', { message: 'Quel événement modifier ?' });
     if (!cat) return out('missing', { message: `Je ne trouve pas « ${label} ».` });
     if (intent.change.type === 'color') {
-      // Décision : pas de changement de couleur d'une catégorie pour l'instant
+      // Pas de changement de couleur d'un type pour l'instant (idée pour plus tard)
       return out('missing', { message: `Changer une couleur n'est pas encore possible : ${cat.name} ${keepsColor(cat)}.` });
     }
     if (intent.change.type === 'move') {
@@ -637,8 +804,7 @@ export function interpret(text, state, todayStr) {
       if (rules.length === 1 && intent._weekday !== undefined) {
         return out('ok', { actions: [{ type: 'move_rule', ruleId: rules[0].id, weekdays: [intent._weekday] }], summary: `Déplacé : ${cat.name}, chaque ${WEEKDAY_NAMES[intent._weekday]}` });
       }
-      const todayS = todayStr;
-      const nextEv = (state.events || []).filter(e => e.categoryId === cat.id && (e.endDate || e.startDate) >= todayS)
+      const nextEv = (state.events || []).filter(e => e.categoryId === cat.id && (e.endDate || e.startDate) >= todayStr)
         .sort((a, b) => a.startDate.localeCompare(b.startDate))[0];
       if (nextEv) return out('ok', { actions: [{ type: 'move_event', eventId: nextEv.id, date: date.date }], summary: `Déplacé : ${cat.name} au ${frDate(date.date)}` });
       return out('ai', { reason: 'déplacement ambigu' });
@@ -648,17 +814,22 @@ export function interpret(text, state, todayStr) {
 
   // ---------- « X en vacances » : exceptions à la règle de X ----------
   if (intent.vacationOf) {
+    const date = intent.date;
     const cat = findCategory(state, intent.vacationOf);
-    const hasRules = cat && (state.recurringRules || []).some(r => r.categoryId === cat.id);
-    if (cat && hasRules) {
-      if (!date) return out('missing', { intent, message: `Quelles dates pour « ${cat.name} » en vacances ?` });
-      const start = date.start || date.date, end = date.end || date.date;
-      return out('ok', { actions: [{ type: 'add_exceptions_to_category', categoryName: cat.name, start, end }], summary: `${cat.name} suspendu ${describeDate(date)}` });
+    if (!cat) {
+      return out('missing', { message: `Je ne connais pas « ${intent.vacationOf} ». S'il s'agit de vos vacances, écrivez « vacances ${date ? describeDate(date) : 'du … au …'} ».` });
     }
-    if (!cat) return out('ai', { reason: `« ${intent.vacationOf} en vacances »` });
+    const hasRules = (state.recurringRules || []).some(r => r.categoryId === cat.id);
+    if (!hasRules) {
+      return out('missing', { message: `« ${cat.name} » n'a pas de jours récurrents à suspendre : rien n'a été retiré. Pour retirer ses événements, écrivez « retire ${cat.name} ${date ? describeDate(date) : 'du … au …'} ».` });
+    }
+    if (!date) return out('missing', { message: `Quelles dates pour « ${cat.name} » en vacances ?` });
+    const actions = itemsOf(date).map(it => ({ type: 'add_exceptions_to_category', categoryName: cat.name, start: startOf(it), end: endOf(it) }));
+    return out('ok', { actions, summary: `${cat.name} suspendu ${describeDate(date)}` });
   }
 
   // ---------- AJOUT ----------
+  let date = intent.date;
   // Fond de case seul (« en fond vert les lundis ») : ni catégorie, ni pastille
   const backgroundOnly = !label && kind !== 'vacation' && color && color.target === 'cell';
   // Libellé optionnel : vacances, ou fond de case
@@ -673,21 +844,45 @@ export function interpret(text, state, todayStr) {
     return out('missing', { message });
   }
 
+  // Exceptions (« sauf … ») appliquées à la date
+  const ex = intent.except;
+  let ruleExceptions = [];
+  if (ex) {
+    if (date.type === 'recurring') {
+      const weekdays = date.weekdays.filter(w => !ex.weekdays.includes(w));
+      if (!weekdays.length) return out('missing', { message: 'Plus aucun jour ne reste : quels jours garder ?' });
+      date = { ...date, weekdays };
+      ruleExceptions = ex.dates;
+    } else if (date.type === 'range') {
+      const parts = splitRange(date.start, date.end, ds => ex.dates.includes(ds) || ex.weekdays.includes((parseDate(ds).getDay() + 6) % 7));
+      if (!parts.length) return out('missing', { message: 'Il ne reste aucun jour : quelles dates garder ?' });
+      date = parts.length === 1 ? { type: 'range', ...parts[0] } : { type: 'multiple', items: parts.map(p => ({ type: 'range', ...p })) };
+    } else {
+      return out('ai', { reason: 'exception sur une date simple' });
+    }
+    intent.date = date;
+  }
+
   if (backgroundOnly) {
     const a = { type: 'add_background', color: color.hex };
-    if (date.type === 'recurring') { a.weekdays = date.weekdays; if (date.start) { a.startDate = date.start; a.endDate = date.end; } }
-    else { a.startDate = date.start || date.date; a.endDate = date.end || date.date; }
-    return out('ok', { actions: [a], summary: `Fond ${color.name}${color.shade ? ' ' + color.shade : ''} : ${describeDate(date)}` });
+    if (date.type === 'recurring') {
+      a.weekdays = date.weekdays;
+      if (date.start) { a.startDate = date.start; a.endDate = date.end; }
+      if (ruleExceptions.length) a.exceptions = ruleExceptions;
+      return out('ok', { actions: [a], summary: `Fond ${color.name}${color.shade ? ' ' + color.shade : ''} : ${describeDate(date)}` });
+    }
+    const actions = itemsOf(date).map(it => ({ type: 'add_background', color: color.hex, startDate: startOf(it), endDate: endOf(it) }));
+    return out('ok', { actions, summary: `Fond ${color.name}${color.shade ? ' ' + color.shade : ''} : ${describeDate(date)}` });
   }
 
   const actions = [];
-  const notes = [];
   let catName;
-  // Catégorie existante : sa couleur ne change jamais (décision), on le signale
+  // Type existant : il garde sa couleur d'origine ; une couleur donnée ne vaut que pour cet événement
   const existingCat = kind === 'vacation' ? vacCat : findCategory(state, label);
+  const own = {};
   if (existingCat) {
     catName = existingCat.name;
-    if (color) notes.push(`${capital(existingCat.name)} ${keepsColor(existingCat)}`);
+    if (color) own[color.target === 'cell' ? 'cellColor' : 'pillColor'] = color.hex;
   } else if (kind === 'vacation') {
     catName = 'vacances';
     const cell = color && color.target === 'cell' ? color.hex : (color ? null : '#FFE5E5');
@@ -706,14 +901,27 @@ export function interpret(text, state, todayStr) {
   const evLabel = (kind === 'vacation' ? (label || 'Vacances') : (label || catName)) + timeTxt;
 
   if (date.type === 'recurring') {
+    // « foot tous les vendredis sauf le 23/10 » alors que la règle existe : on lui ajoute l'exception
+    const sameRule = existingCat && ruleExceptions.length && !color && (state.recurringRules || []).find(r =>
+      r.categoryId === existingCat.id && sameDays([...(r.weekdays || [])].sort(), date.weekdays) &&
+      (r.startDate || null) === (date.start || null) && (r.endDate || null) === (date.end || null));
+    if (sameRule) {
+      return out('ok', { actions: [{ type: 'add_rule_exceptions', ruleId: sameRule.id, dates: ruleExceptions }],
+        summary: `Exception ajoutée : ${catName}, ${ruleExceptions.length === 1 ? 'le ' + frDate(ruleExceptions[0]) : ruleExceptions.length + ' jours'}` });
+    }
     const a = { type: 'add_recurring', categoryName: catName, weekdays: date.weekdays };
     if (date.start) { a.startDate = date.start; a.endDate = date.end; }
+    if (ruleExceptions.length) a.exceptions = ruleExceptions;
+    Object.assign(a, own);
     actions.push(a);
   } else {
-    actions.push({ type: 'add_event', categoryName: catName, label: evLabel, startDate: date.start || date.date, endDate: date.end || date.date });
+    for (const it of itemsOf(date)) {
+      actions.push({ type: 'add_event', categoryName: catName, label: evLabel, startDate: startOf(it), endDate: endOf(it), ...own });
+    }
   }
   const parts = [kind === 'vacation' ? (label ? `vacances (${label})` : 'vacances') : label, describeDate(date)];
   if (intent.time) parts.push(timeTxt.trim());
-  if (color && !existingCat) parts.push(colorLabel(color));
-  return out('ok', { actions, summary: `Ajouté : ${parts.join(', ')}` + (notes.length ? `. ${notes.join('. ')}.` : '') });
+  if (color) parts.push(existingCat ? `${colorLabel(color)} (cet événement seulement)` : colorLabel(color));
+  if (ruleExceptions.length) parts.push(`sauf ${ruleExceptions.length === 1 ? 'le ' + frDate(ruleExceptions[0]) : ruleExceptions.length + ' jours'}`);
+  return out('ok', { actions, summary: `Ajouté : ${parts.join(', ')}` });
 }

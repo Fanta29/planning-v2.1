@@ -4,6 +4,21 @@
 // ============================================================
 import { fmtDate, parseDate, addDays, uid } from './dates.js';
 
+// Tous les jours entre deux dates incluses (plafonné à 2 ans)
+export function daysBetween(start, end) {
+  const out = [];
+  const it = parseDate(start), last = parseDate(end);
+  while (it <= last && out.length < 731) { out.push(fmtDate(it)); it.setDate(it.getDate() + 1); }
+  return out;
+}
+// La règle tombe-t-elle ce jour-là (jours de semaine, bornes) ?
+export function ruleActiveOn(r, ds) {
+  if (r.startDate && ds < r.startDate) return false;
+  if (r.endDate && ds > r.endDate) return false;
+  if (r.weekdays && !r.weekdays.includes((parseDate(ds).getDay() + 6) % 7)) return false;
+  return true;
+}
+
 export function applyActions(state, actions) {
   let s = {
     ...state,
@@ -61,14 +76,18 @@ export function applyActions(state, actions) {
       case 'add_recurring': {
         const cat = findCat(a.categoryName);
         if (cat) {
-          s.recurringRules.push({
+          const rule = {
             id: uid('rule'),
             categoryId: cat.id,
             weekdays: a.weekdays || [],
             startDate: a.startDate || null,
             endDate: a.endDate || null,
             exceptions: a.exceptions || [],
-          });
+          };
+          // Couleur propre à cette règle (le type garde sa couleur d'origine)
+          if (a.pillColor) rule.pillColor = a.pillColor;
+          if (a.cellColor) rule.cellColor = a.cellColor;
+          s.recurringRules.push(rule);
           changed = true;
         }
         break;
@@ -113,13 +132,17 @@ export function applyActions(state, actions) {
           };
           s.categories.push(cat);
         }
-        s.events.push({
+        const ev = {
           id: uid('evt'),
           categoryId: cat.id,
           label: a.label || a.categoryName,
           startDate: a.startDate,
           endDate: a.endDate || a.startDate,
-        });
+        };
+        // Couleur propre à cet événement (le type garde sa couleur d'origine)
+        if (a.pillColor) ev.pillColor = a.pillColor;
+        if (a.cellColor) ev.cellColor = a.cellColor;
+        s.events.push(ev);
         changed = true;
         break;
       }
@@ -163,6 +186,23 @@ export function applyActions(state, actions) {
           if (eEnd > a.end) out.push({ ...e, id: e.startDate < a.start ? uid('evt') : e.id, startDate: fmtDate(addDays(parseDate(a.end), 1)), endDate: eEnd });
         }
         s.events = out;
+        // Règles récurrentes du même type : les jours concernés deviennent des exceptions
+        // (« pas de foot le 23/10 » retire cette seule occurrence, la règle reste)
+        for (const r of s.recurringRules) {
+          if (!targetIds.has(r.categoryId)) continue;
+          for (const ds of daysBetween(a.start, a.end)) {
+            if (ruleActiveOn(r, ds) && !r.exceptions.includes(ds)) { r.exceptions.push(ds); changed = true; }
+          }
+        }
+        break;
+      }
+      // Ajoute des dates d'exception à une règle existante (« … sauf le 23/10 »)
+      case 'add_rule_exceptions': {
+        const r = s.recurringRules.find(x => x.id === a.ruleId);
+        if (r) {
+          for (const ds of a.dates || []) if (!r.exceptions.includes(ds)) { r.exceptions.push(ds); changed = true; }
+          r.exceptions.sort();
+        }
         break;
       }
       // Change les jours d'une règle récurrente (ex. « décale le foot au jeudi »)
