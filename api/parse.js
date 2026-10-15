@@ -13,22 +13,21 @@ const FALLBACK = { model: 'gemini-3.8-flash', thinkingLevel: 'low' };
 // on abandonne et on bascule sur le secours au lieu de faire attendre l'utilisateur.
 const PRIMARY_TIMEOUT_MS = 5000;
 
+// Mêmes listes que le parser natif (src/lib/parser.js) — garder les deux à jour.
 const WORK_REGULAR_SYNONYMS = [
-  'travail', 'travailler', 'taf', 'taffer', 'taffe', 'boulot', 'bosser', 'job',
-  'work', 'working', 'had', 'rcp', 'staff', 'visite', 'tournée',
-  'consultation', 'consult', 'rdv pro', 'rendez-vous pro', 'réunion', 'meeting',
-  'mission', 'contrat', 'prestation', 'mandat', 'déplacement pro',
+  'travail', 'travailler', 'taf', 'taffer', 'taffe', 'boulot', 'bosser', 'job', 'work', 'working',
+  'consultation', 'consult', 'rdv pro', 'rendez-vous pro', 'réunion', 'meeting', 'briefing',
+  'présentation', 'formation', 'séminaire', 'conf', 'conférence', 'cours', 'td', 'tp', 'examen',
+  'partiel', 'oral', 'soutenance', 'mission', 'contrat', 'prestation', 'mandat', 'déplacement pro',
+  'voyage pro', 'déplacement professionnel', 'business trip', 'HAD', 'RCP', 'staff', 'visite',
+  'tournée', 'vacation pro', 'séance', 'atelier pro',
 ];
 
-const STAGE_SYNONYMS = [
-  'stage', 'internat', 'externat', 'séminaire', 'formation', 'cours',
-  'td', 'tp', 'examen', 'partiel', 'oral', 'soutenance', 'conf', 'conférence',
-  'vacation pro', 'séance', 'atelier pro',
-];
+const STAGE_SYNONYMS = ['stage', 'internat', 'externat'];
 
-const VACATION_SYNONYMS = [
-  'vacances', 'vacance', 'vacs', 'congé', 'congés', 'repos', 'off', 'rtt',
-];
+const GARDE_SYNONYMS = ['garde', 'gardes', 'astreinte', 'astreintes'];
+
+const VACATION_SYNONYMS = ['vacances', 'vacance', 'vacs', 'vac', 'congés', 'congé', 'CP', 'repos'];
 
 const PILL_COLORS = `
 COULEURS VIVES (pour les pilules / badges) :
@@ -150,9 +149,19 @@ Chaque catégorie a un "kind" et éventuellement un "subkind" :
 3. **kind = "work" + subkind = "regular"** : travail régulier
    - Déclenché par : ${WORK_REGULAR_SYNONYMS.join(', ')}
    - Les jours fériés sont EXCLUS automatiquement
+   - « cours de sport », « cours de piano »… sont des loisirs (neutral), pas du travail
 
-4. **kind = "neutral"** : tout le reste (sport, perso, social...)
+4. **kind = "work" + subkind = "garde"** : gardes et astreintes
+   - Déclenché par : ${GARDE_SYNONYMS.join(', ')}
+   - Les jours fériés ne sont PAS exclus (il y a des gardes les jours fériés)
+
+5. **kind = "neutral"** : tout le reste (sport, perso, social, permanence, rotation...)
    - Les jours fériés ne sont PAS exclus
+   - « vacation pro » est du travail, PAS des vacances
+
+COULEURS DES CATÉGORIES EXISTANTES : ne les change JAMAIS. Une couleur ne s'applique qu'à une
+catégorie nouvelle. N'utilise pas update_category pour changer une couleur.
+FOND DE CASE SANS ÉVÉNEMENT (« en fond vert les lundis ») : action add_background, pas de catégorie.
 
 ==========================================
 INTERPRÉTATION DES PHRASES
@@ -194,7 +203,7 @@ FORMAT DE RÉPONSE (JSON strict)
 
 ACTIONS :
 
-1. {"type":"create_category","name":"...","pillColor":"#... ou none","cellColor":"#... ou none","kind":"work|vacation|neutral","subkind":"stage|regular|none"}
+1. {"type":"create_category","name":"...","pillColor":"#... ou none","cellColor":"#... ou none","kind":"work|vacation|neutral","subkind":"stage|regular|garde|none"}
 2. {"type":"update_category","name":"...","pillColor":"...","cellColor":"...","kind":"...","subkind":"..."}
 3. {"type":"delete_category","name":"..."}
 4. {"type":"add_recurring","categoryName":"...","weekdays":[0..6],"startDate":"YYYY-MM-DD","endDate":"YYYY-MM-DD","exceptions":["YYYY-MM-DD"]}
@@ -204,6 +213,7 @@ ACTIONS :
 7. {"type":"add_event","categoryName":"...","label":"...","startDate":"YYYY-MM-DD","endDate":"YYYY-MM-DD"}
 8. {"type":"remove_event","label":"..."} (option "date":"YYYY-MM-DD")
 9. {"type":"add_note","date":"YYYY-MM-DD","text":"..."}
+11. {"type":"add_background","color":"#pastel","weekdays":[0..6],"startDate":"YYYY-MM-DD","endDate":"YYYY-MM-DD"}
 10. {"type":"update_settings","vacationPeriod":"civil|university","theme":"auto|light|dark"}
 
 ==========================================
@@ -274,12 +284,13 @@ const RESPONSE_SCHEMA = {
           type: { type: 'string', enum: [
             'create_category', 'update_category', 'delete_category', 'add_recurring',
             'add_exceptions_to_category', 'remove_recurring', 'add_event', 'remove_event',
-            'add_note', 'remove_note', 'update_settings',
+            'add_note', 'remove_note', 'update_settings', 'add_background',
           ] },
           name: STR, newName: STR, categoryName: STR, label: STR, text: STR,
           pillColor: COLOR, cellColor: COLOR,
           kind: { type: 'string', enum: ['work', 'vacation', 'neutral'] },
-          subkind: { type: 'string', enum: ['stage', 'regular', 'none'] },
+          subkind: { type: 'string', enum: ['stage', 'regular', 'garde', 'none'] },
+          color: COLOR,
           weekdays: { type: 'array', items: { type: 'integer', minimum: 0, maximum: 6 }, description: '0=lundi … 6=dimanche' },
           startDate: DATE, endDate: DATE, start: DATE, end: DATE, date: DATE,
           exceptions: { type: 'array', items: DATE },

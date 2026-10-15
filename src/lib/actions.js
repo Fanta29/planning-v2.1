@@ -10,6 +10,7 @@ export function applyActions(state, actions) {
     categories: state.categories.map(c => ({ ...c })),   // copies : « Annuler » doit retrouver l'ancien état intact
     recurringRules: state.recurringRules.map(r => ({ ...r, exceptions: [...(r.exceptions || [])] })),
     events: state.events.map(e => ({ ...e })),
+    backgrounds: (state.backgrounds || []).map(b => ({ ...b })),
     dayNotes: [...state.dayNotes],
   };
   let changed = false;
@@ -20,9 +21,8 @@ export function applyActions(state, actions) {
     switch (a.type) {
       case 'create_category': {
         const existing = findCat(a.name);
+        // Décision : la couleur d'une catégorie existante ne change jamais
         if (existing) {
-          if (a.pillColor !== undefined) existing.pillColor = a.pillColor;
-          if (a.cellColor !== undefined) existing.cellColor = a.cellColor;
           if (a.kind !== undefined) existing.kind = a.kind;
           if (a.subkind !== undefined) existing.subkind = a.subkind;
         } else {
@@ -40,9 +40,7 @@ export function applyActions(state, actions) {
       }
       case 'update_category': {
         const cat = findCat(a.name);
-        if (cat) {
-          if (a.pillColor !== undefined) cat.pillColor = a.pillColor;
-          if (a.cellColor !== undefined) cat.cellColor = a.cellColor;
+        if (cat) {   // couleurs ignorées : pas de changement de couleur pour l'instant
           if (a.kind !== undefined) cat.kind = a.kind;
           if (a.subkind !== undefined) cat.subkind = a.subkind;
           if (a.newName !== undefined) cat.name = a.newName;
@@ -182,6 +180,15 @@ export function applyActions(state, actions) {
           e.endDate = fmtDate(addDays(parseDate(a.date), len));
           changed = true;
         }
+        break;
+      }
+      // Fond de case (ni catégorie, ni pastille) : jours de semaine et/ou période
+      case 'add_background': {
+        s.backgrounds.push({
+          id: uid('bg'), color: a.color, weekdays: a.weekdays || null,
+          startDate: a.startDate || null, endDate: a.endDate || null, exceptions: [],
+        });
+        changed = true;
         break;
       }
       case 'update_settings': {

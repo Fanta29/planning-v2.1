@@ -190,20 +190,28 @@ describe('ajouts complets', () => {
     expect(r.intent).toMatchObject({ kind: 'vacation', date: { type: 'single', date: '2026-10-30' } });
   });
 
-  it('en fond vert les lundis → chaque lundi, fond de case vert, sans libellé', () => {
+  // Décision : un fond de case n'est ni une catégorie ni une pastille
+  it('en fond vert les lundis → fond des cases du lundi en vert, sans catégorie ni pastille', () => {
     const r = run('en fond vert les lundis');
     expect(r.status).toBe('ok');
     expect(r.intent).toMatchObject({ action: 'add', label: null, date: { type: 'recurring', weekdays: [0] } });
     expect(r.intent.color).toMatchObject({ name: 'vert', target: 'cell' });
-    const cat = r.actions.find(a => a.type === 'create_category');
-    expect(cat.cellColor).toBeTruthy();
-    expect(cat.pillColor).toBeNull();
+    expect(r.actions).toHaveLength(1);
+    expect(r.actions[0]).toMatchObject({ type: 'add_background', weekdays: [0] });
+    expect(r.actions[0].color).toMatch(/^#[0-9A-F]{6}$/);
+    const { newState } = applyActions(VIDE, r.actions);
+    expect(newState.categories).toHaveLength(0);
+    expect(newState.backgrounds).toHaveLength(1);
+  });
+  it('fond orange du 02/11 au 06/11 → fond des cases sur la période', () => {
+    const r = run('fond orange du 02/11 au 06/11');
+    expect(r.actions[0]).toMatchObject({ type: 'add_background', startDate: '2026-11-02', endDate: '2026-11-06' });
   });
 
-  it('garde le 12/11 → événement ordinaire (pas du travail)', () => {
+  it('garde le 12/11 → travail (garde : jours fériés non exclus)', () => {
     const r = run('garde le 12/11');
     expect(r.status).toBe('ok');
-    expect(r.intent).toMatchObject({ action: 'add', label: 'garde', kind: 'neutral', date: { type: 'single', date: '2026-11-12' } });
+    expect(r.intent).toMatchObject({ action: 'add', label: 'garde', kind: 'work', subkind: 'garde', date: { type: 'single', date: '2026-11-12' } });
   });
 });
 
@@ -216,6 +224,19 @@ describe('jour de la semaine seul = un seul événement, le prochain, aujourd\'h
       action: 'add', date: { type: 'single', date: '2026-10-18' },
       color: { hex: '#34C759', target: 'pill' }, label: 'nfl',
     });
+  });
+  // Décision : une couleur donnée ne modifie jamais une catégorie existante
+  it('mercredi en rouge foot (foot existe, vert) → ajouté en vert, l\'app le signale', () => {
+    const r = run('mercredi en rouge foot', ETAT);
+    expect(r.status).toBe('ok');
+    expect(r.actions).toEqual([{ type: 'add_event', categoryName: 'foot', label: 'foot', startDate: '2026-10-21', endDate: '2026-10-21' }]);
+    expect(r.summary).toMatch(/Foot garde sa couleur verte/);
+    expect(applyActions(ETAT, r.actions).newState.categories.find(c => c.id === 'c_foot').pillColor).toBe('#34C759');
+  });
+  it('vacances en orange du 02/11 au 06/11 (vacances existent) → couleur inchangée, signalée', () => {
+    const r = run('vacances en orange du 02/11 au 06/11', ETAT);
+    expect(r.actions.some(a => a.type === 'update_category' || a.type === 'create_category')).toBe(false);
+    expect(r.summary).toMatch(/garde sa couleur/);
   });
   it('mercredi en rouge foot → mercredi 21/10, un seul événement', () => {
     const r = run('mercredi en rouge foot');
@@ -310,24 +331,22 @@ describe('modifications', () => {
     const { newState } = applyActions(ETAT, r.actions);
     expect(newState.recurringRules.find(x => x.id === 'r_foot').weekdays).toEqual([3]);
   });
-  it('mets le stage en bleu', () => {
-    const r = run('mets le stage en bleu', ETAT);
-    expect(r.status).toBe('ok');
-    expect(r.intent).toMatchObject({ action: 'modify', change: { type: 'color' } });
-    expect(applyActions(ETAT, r.actions).newState.categories.find(c => c.id === 'c_stage').pillColor).toBe('#007AFF');
-  });
-  it('change la couleur du foot en vert pastel → pastille vert pastel', () => {
-    const r = run('change la couleur du foot en vert pastel', ETAT);
-    expect(r.status).toBe('ok');
-    const foot = applyActions(ETAT, r.actions).newState.categories.find(c => c.id === 'c_foot');
-    expect(foot.pillColor).toBe(r.intent.color.hex);
-    expect(r.intent.color).toMatchObject({ name: 'vert', shade: 'pastel', target: 'pill' });
-    expect(foot.cellColor).toBeNull();
-  });
-  it('catégorie introuvable → message, pas d\'IA', () => {
-    const r = run('mets le tennis en bleu', ETAT);
-    expect(r.status).toBe('missing');
-    expect(r.message).toMatch(/tennis/);
+  // Décision : pas de changement de couleur pour l'instant → on le dit, sans IA
+  for (const phrase of ['mets le stage en bleu', 'change la couleur du foot en vert pastel']) {
+    it(`${phrase} → pas encore possible, rien ne change`, () => {
+      const r = run(phrase, ETAT);
+      expect(r.status).toBe('missing');
+      expect(r.intent).toMatchObject({ action: 'modify', change: { type: 'color' } });
+      expect(r.message).toMatch(/couleur/);
+    });
+  }
+  it('les actions de l\'IA ne changent pas non plus la couleur d\'une catégorie existante', () => {
+    const { newState } = applyActions(ETAT, [
+      { type: 'create_category', name: 'foot', pillColor: '#FF0000', cellColor: '#00FF00', kind: 'neutral' },
+      { type: 'update_category', name: 'stage', pillColor: '#000000' },
+    ]);
+    expect(newState.categories.find(c => c.id === 'c_foot')).toMatchObject({ pillColor: '#34C759', cellColor: null });
+    expect(newState.categories.find(c => c.id === 'c_stage').pillColor).toBe('#FF3B30');
   });
 });
 
@@ -346,8 +365,11 @@ describe('régression : « X en vacances » ajoute des exceptions, pas des vacan
 
 // ------------------------------------------------------------
 describe('synonymes et types', () => {
-  it('« garde », « astreinte », « permanence », « rotation » ne sont pas du travail', () => {
-    for (const w of ['garde', 'astreinte', 'permanence', 'rotation']) expect(run(`${w} le 12/11`).intent.kind).toBe('neutral');
+  it('« garde » et « astreinte » sont du travail (sous-type garde : fériés non exclus)', () => {
+    for (const w of ['garde', 'gardes', 'astreinte']) expect(run(`${w} le 12/11`).intent).toMatchObject({ kind: 'work', subkind: 'garde' });
+  });
+  it('« permanence » et « rotation » restent neutres', () => {
+    for (const w of ['permanence', 'rotation']) expect(run(`${w} le 12/11`).intent.kind).toBe('neutral');
   });
   it('« vacation pro » est du travail, pas des vacances', () => {
     expect(run('vacation pro le 12/11').intent.kind).toBe('work');

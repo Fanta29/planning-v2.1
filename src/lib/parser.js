@@ -29,7 +29,10 @@ const WEEKDAY_NAMES = ['lundi', 'mardi', 'mercredi', 'jeudi', 'vendredi', 'samed
 const VACATION_WORDS = ['vacances', 'vacance', 'vacs', 'vac', 'conges', 'conge', 'cp', 'repos'];
 
 // Travail : exclusion automatique des fériés pour les récurrences.
-// ATTENTION : garde, astreinte, permanence, rotation ne sont PAS du travail.
+// Garde et astreinte : du travail (comptées, masquées pendant les vacances) mais sous-type
+// « garde » : les jours fériés ne sont PAS exclus (il y a des gardes les jours fériés).
+// Permanence et rotation restent des événements ordinaires.
+const GARDE_WORDS = ['garde', 'gardes', 'astreinte', 'astreintes'];
 const WORK_WORDS = [
   'travail', 'travailler', 'taf', 'taffer', 'boulot', 'bosser', 'job', 'taffe', 'work', 'working',
   'stage', 'internat', 'externat', 'consultation', 'consult', 'rdv pro', 'rendez-vous pro',
@@ -408,7 +411,10 @@ export function parsePhrase(text, todayStr) {
   if (intent.kind !== 'vacation' && intent.label) {
     const isWork = WORK_WORDS.some(w => labelN.includes(` ${w} `));
     const isLeisure = LEISURE_WORDS.some(w => labelN.includes(` ${w} `));
-    if (isWork && !isLeisure) {
+    if (GARDE_WORDS.some(w => labelN.includes(` ${w} `))) {
+      intent.kind = 'work';
+      intent.subkind = 'garde';
+    } else if (isWork && !isLeisure) {
       intent.kind = 'work';
       intent.subkind = STAGE_WORDS.some(w => labelN.includes(` ${w} `)) ? 'stage' : 'regular';
     }
@@ -515,6 +521,47 @@ export function describeDate(date) {
 }
 const colorLabel = c => c ? `${c.target === 'cell' ? 'fond ' : ''}${c.name}${c.shade ? ' ' + ({ fonce: 'foncé' }[c.shade] || c.shade) : ''}` : '';
 
+// « Foot garde sa couleur verte » : nom de la couleur la plus proche, accordé au féminin
+const FEMININE = { vert: 'verte', bleu: 'bleue', violet: 'violette', gris: 'grise', blanc: 'blanche', noir: 'noire', dore: 'dorée' };
+// Pastels déjà utilisés par l'IA dans les données existantes (ancien prompt)
+const KNOWN_PASTELS = {
+  '#FFE5E5': 'rouge pastel', '#FFE5C5': 'orange pastel', '#FFD8C7': 'saumon pastel', '#FFD5C5': 'pêche pastel',
+  '#FFF9C5': 'jaune pastel', '#FFFFC5': 'citron pastel', '#FFF5D5': 'crème', '#F5F0DC': 'vanille',
+  '#D5F5D5': 'vert pastel', '#C5F5D5': 'menthe pastel', '#C5E5D5': "vert d'eau", '#C5F5F5': 'turquoise pastel',
+  '#D5E5FF': 'bleu pastel', '#C5DEFF': 'bleu ciel pastel', '#E5DEFF': 'lavande pastel', '#E5D5FF': 'violet pastel',
+  '#DCC5FF': 'mauve pastel', '#E5D8F5': 'lilas pastel', '#FFD5E5': 'rose pastel', '#F8D5DC': 'rose poudré',
+  '#FFCCDD': 'rose bonbon pastel', '#E5E5EA': 'gris pastel', '#F0E5D0': 'beige pastel',
+};
+export function colorName(hex) {
+  if (!hex) return null;
+  if (KNOWN_PASTELS[hex.toUpperCase()]) return KNOWN_PASTELS[hex.toUpperCase()];
+  const rgb = h => [0, 2, 4].map(i => parseInt(h.replace('#', '').slice(i, i + 2), 16));
+  const [r, g, b] = rgb(hex);
+  let best = null, bestD = Infinity;
+  for (const [name, h] of Object.entries(COLORS)) {
+    if (name === 'magenta' || name === 'dore') continue;
+    const [r2, g2, b2] = rgb(h);
+    const d = (r - r2) ** 2 + (g - g2) ** 2 + (b - b2) ** 2;
+    if (d < bestD) { best = name; bestD = d; }
+  }
+  // couleur très claire (fond pastel) : on cherche la teinte d'origine
+  if (Math.min(r, g, b) > 190 && bestD > 0) {
+    for (const [name, h] of Object.entries(COLORS)) {
+      if (name === 'blanc') continue;
+      const p = rgb(mix(h, 'white', 0.8));
+      const d = (r - p[0]) ** 2 + (g - p[1]) ** 2 + (b - p[2]) ** 2;
+      if (d < bestD) { best = name + ' pastel'; bestD = d; }
+    }
+  }
+  const [base, extra] = best.split(' ');
+  return (FEMININE[base] || base) + (extra ? ' ' + extra : '');
+}
+function keepsColor(cat) {
+  if (cat.pillColor) return `garde sa couleur ${colorName(cat.pillColor)}`;
+  if (cat.cellColor) return `garde sa couleur de fond ${colorName(cat.cellColor)}`;
+  return 'garde sa couleur actuelle';
+}
+
 function findCategory(state, label) {
   if (!label) return null;
   const n = norm(label).trim();
@@ -581,8 +628,8 @@ export function interpret(text, state, todayStr) {
     if (!label) return out('missing', { message: 'Quel événement modifier ?' });
     if (!cat) return out('missing', { message: `Je ne trouve pas « ${label} ».` });
     if (intent.change.type === 'color') {
-      const field = color.target === 'cell' ? 'cellColor' : 'pillColor';
-      return out('ok', { actions: [{ type: 'update_category', name: cat.name, [field]: color.hex }], summary: `Modifié : ${cat.name} en ${colorLabel(color)}` });
+      // Décision : pas de changement de couleur d'une catégorie pour l'instant
+      return out('missing', { message: `Changer une couleur n'est pas encore possible : ${cat.name} ${keepsColor(cat)}.` });
     }
     if (intent.change.type === 'move') {
       if (!date || date.type !== 'single') return out('missing', { message: `Quand déplacer « ${cat.name} » ?` });
@@ -612,8 +659,10 @@ export function interpret(text, state, todayStr) {
   }
 
   // ---------- AJOUT ----------
-  // Libellé optionnel : vacances, ou couleur de fond sur une récurrence (« en fond vert les lundis »)
-  const labelOptional = kind === 'vacation' || (color && color.target === 'cell');
+  // Fond de case seul (« en fond vert les lundis ») : ni catégorie, ni pastille
+  const backgroundOnly = !label && kind !== 'vacation' && color && color.target === 'cell';
+  // Libellé optionnel : vacances, ou fond de case
+  const labelOptional = kind === 'vacation' || backgroundOnly;
   if (!label && !labelOptional) intent.missing.push('evenement');
   if (!date) intent.missing.push('date');
   if (intent.missing.length) {
@@ -624,24 +673,31 @@ export function interpret(text, state, todayStr) {
     return out('missing', { message });
   }
 
-  const actions = [];
-  let catName;
-  if (kind === 'vacation') {
-    catName = vacCat ? vacCat.name : 'vacances';
-    if (!vacCat) actions.push({ type: 'create_category', name: catName, pillColor: null, cellColor: '#FFE5E5', kind: 'vacation', subkind: null });
-  } else {
-    const existing = findCategory(state, label);
-    catName = existing ? existing.name : (label || capital(colorLabel(color)));
-    if (!existing) {
-      const pill = color && color.target === 'pill' ? color.hex : (color ? null : '#007AFF');
-      const cell = color && color.target === 'cell' ? color.hex : (intent.cellColor ? intent.cellColor.hex : null);
-      actions.push({ type: 'create_category', name: catName, pillColor: pill, cellColor: cell, kind, subkind: intent.subkind });
-    }
+  if (backgroundOnly) {
+    const a = { type: 'add_background', color: color.hex };
+    if (date.type === 'recurring') { a.weekdays = date.weekdays; if (date.start) { a.startDate = date.start; a.endDate = date.end; } }
+    else { a.startDate = date.start || date.date; a.endDate = date.end || date.date; }
+    return out('ok', { actions: [a], summary: `Fond ${color.name}${color.shade ? ' ' + color.shade : ''} : ${describeDate(date)}` });
   }
-  // Couleur précisée sur une catégorie existante : la couleur choisie s'applique
+
+  const actions = [];
+  const notes = [];
+  let catName;
+  // Catégorie existante : sa couleur ne change jamais (décision), on le signale
   const existingCat = kind === 'vacation' ? vacCat : findCategory(state, label);
-  if (existingCat && color) {
-    actions.push({ type: 'update_category', name: existingCat.name, [color.target === 'cell' ? 'cellColor' : 'pillColor']: color.hex });
+  if (existingCat) {
+    catName = existingCat.name;
+    if (color) notes.push(`${capital(existingCat.name)} ${keepsColor(existingCat)}`);
+  } else if (kind === 'vacation') {
+    catName = 'vacances';
+    const cell = color && color.target === 'cell' ? color.hex : (color ? null : '#FFE5E5');
+    const pill = color && color.target === 'pill' ? color.hex : null;
+    actions.push({ type: 'create_category', name: catName, pillColor: pill, cellColor: cell, kind: 'vacation', subkind: null });
+  } else {
+    catName = label;
+    const pill = color && color.target === 'pill' ? color.hex : (color ? null : '#007AFF');
+    const cell = color && color.target === 'cell' ? color.hex : (intent.cellColor ? intent.cellColor.hex : null);
+    actions.push({ type: 'create_category', name: catName, pillColor: pill, cellColor: cell, kind, subkind: intent.subkind });
   }
 
   // Heure : pas encore de champ dédié dans les données → ajoutée au libellé des événements ponctuels
@@ -656,8 +712,8 @@ export function interpret(text, state, todayStr) {
   } else {
     actions.push({ type: 'add_event', categoryName: catName, label: evLabel, startDate: date.start || date.date, endDate: date.end || date.date });
   }
-  const parts = [kind === 'vacation' ? (label ? `vacances (${label})` : 'vacances') : (label || colorLabel(color)), describeDate(date)];
+  const parts = [kind === 'vacation' ? (label ? `vacances (${label})` : 'vacances') : label, describeDate(date)];
   if (intent.time) parts.push(timeTxt.trim());
-  if (color && label) parts.push(colorLabel(color));
-  return out('ok', { actions, summary: `Ajouté : ${parts.join(', ')}` });
+  if (color && !existingCat) parts.push(colorLabel(color));
+  return out('ok', { actions, summary: `Ajouté : ${parts.join(', ')}` + (notes.length ? `. ${notes.join('. ')}.` : '') });
 }
