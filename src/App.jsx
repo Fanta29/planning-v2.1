@@ -1189,6 +1189,19 @@ export default function App() {
     recordMonthChange(t0);
   };
 
+  // « Aujourd'hui : JJ/MM » → mois en cours, jour d'aujourd'hui sélectionné
+  const goToToday = () => {
+    const now = new Date();
+    const y = now.getFullYear(), m = now.getMonth() + 1;
+    if (y !== year || m !== month) {
+      const t0 = performance.now();
+      setSlideDir(y * 12 + m > year * 12 + month ? 1 : -1);
+      setYear(y); setMonth(m);
+      recordMonthChange(t0);
+    }
+    setSelected(fmtDate(now));
+  };
+
   const swipeHandlers = useSwipe(
     () => animateMonthChange(1),
     () => animateMonthChange(-1),
@@ -1243,12 +1256,12 @@ export default function App() {
               ))}
             </select>
             {isMobile && (
-              <p style={{ margin: 0, fontSize: 14, color: theme.textSecondary, fontWeight: 400 }}>
-                {(() => {
-                  const t = new Date();
-                  return `Aujourd'hui : ${fmtFr(fmtDate(t))}`;
-                })()}
-              </p>
+              <button onClick={goToToday} title="Revenir à aujourd'hui" style={{
+                margin: 0, padding: 0, border: 'none', background: 'transparent', cursor: 'pointer',
+                fontSize: 14, color: theme.accent, fontWeight: 400, fontFamily: 'inherit',
+              }}>
+                Aujourd'hui : {fmtFr(fmtDate(new Date()))}
+              </button>
             )}
           </div>
           <div style={{ display: 'flex', alignItems: 'center', gap: isMobile ? 4 : 8 }}>
