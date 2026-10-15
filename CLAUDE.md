@@ -53,7 +53,10 @@ Lis ce fichier en entier avant toute modification.
 ```
 api/parse.js        Vercel Function : appelle Gemini avec GEMINI_API_KEY (clé côté serveur uniquement)
 src/main.jsx        point d'entrée React
-src/App.jsx         toute l'interface + logique calendrier + application des actions
+src/App.jsx         toute l'interface + logique calendrier
+src/lib/parser.js   parser natif (sans IA) — tests : src/lib/parser.test.js (npm test)
+src/lib/actions.js  application des actions (parser et IA), fonction pure
+src/lib/dates.js    fonctions de dates
 src/lib/storage.js  SEUL point de contact avec la persistance (localStorage aujourd'hui)
 src/lib/perf.js     mesures de vitesse en mémoire (Réglages → Diagnostic de vitesse)
 vercel.json         région des fonctions : cdg1 (Paris)
@@ -66,10 +69,12 @@ phrase, les catégories, la date du jour) → Gemini renvoie `{ actions[], feedb
 (`saveState`) → la grille (`MonthGrid`) recalcule les cases du mois via `getDayContent`.
 
 Modèle de données (`planning_state_v21`) :
-- `categories[]` : `{ id, name, pillColor, cellColor, kind: work|vacation|neutral, subkind: stage|regular|null }`
+- `categories[]` : `{ id, name, pillColor, cellColor, kind: work|vacation|neutral, subkind: stage|regular|garde|null }`
 - `recurringRules[]` : `{ id, categoryId, weekdays[0=lundi..6], startDate, endDate, exceptions[] }`
 - `events[]` : `{ id, categoryId, label, startDate, endDate }` (dates `AAAA-MM-JJ`, pas d'heure)
 - `dayNotes[]` : `{ id, date, text }`
+- `backgrounds[]` : `{ id, color, weekdays[]|null, startDate, endDate, exceptions[] }` (fonds de
+  case ; absent des anciennes données → liste vide)
 - `settings` : `{ vacationPeriod: 'civil'|'university'|{startMonth,startDay,endMonth,endDay}, theme }`
 
 ## Décisions prises (ne pas rouvrir)
@@ -84,8 +89,32 @@ Modèle de données (`planning_state_v21`) :
 - Comportements à préserver : badges travail masqués pendant les vacances ; « X en vacances »
   sur une catégorie existante ajoute des exceptions à sa règle récurrente (pas de vacances
   perso) ; message « Rien trouvé » si une action échoue.
-- « garde », « astreinte », « permanence », « rotation » ne sont PAS du travail (pas
-  d'exclusion des fériés). « vacation pro » ≠ « vacances ».
+- **Le parser ne devine jamais** : s'il hésite ou s'il manque une pièce, il pose une question
+  courte (« Quel événement et quelle date ? », « Quelle date pour « inscription » ? »,
+  « Quelles dates pour les vacances ? »). Ce principe vaut partout.
+- **Objectif** : le parser comprend tout ; l'IA ne sert qu'en tout dernier recours. Pour
+  chaque nouveau type de phrase complexe : proposer d'abord les phrases et le résultat
+  attendu sous forme de tests, les faire valider par l'utilisateur, puis coder.
+- **Couleurs** : une couleur donnée pour une catégorie existante ne modifie jamais la
+  catégorie ; l'événement est ajouté avec la couleur actuelle et l'app le signale en une
+  ligne (« Foot garde sa couleur verte »). Pas de changement de couleur pour l'instant
+  (« mets le stage en bleu » → message « pas encore possible »), ni par le parser ni par l'IA.
+- **Fond de case** : « en fond vert les lundis » colore le fond des cases des jours concernés
+  (liste `backgrounds`), comme les vacances perso. Ce n'est ni une catégorie ni une pastille.
+- **Garde, astreinte** : travail (comptées, masquées pendant les vacances), sous-type
+  `garde` : les jours fériés ne sont PAS exclus (il y a des gardes les jours fériés).
+  Permanence et rotation restent neutres. « vacation pro » ≠ « vacances ».
+- **Plage sans année** = période dont la fin n'est pas encore passée (validé).
+- **Mots du travail** (liste complète, identique dans `parser.js` et `api/parse.js`) :
+  travail, travailler, taf, taffer, taffe, boulot, bosser, job, work, working, stage, internat,
+  externat, consultation, consult, RDV pro, rendez-vous pro, réunion, meeting, briefing,
+  présentation, formation, séminaire, conf, conférence, cours, td, tp, examen, partiel, oral,
+  soutenance, mission, contrat, prestation, mandat, déplacement pro, voyage pro, déplacement
+  professionnel, business trip, HAD, RCP, staff, visite, tournée, vacation pro, séance,
+  atelier pro ; sous-type garde : garde, gardes, astreinte, astreintes. Sous-type stage :
+  stage, internat, externat. « cours de sport / piano… » = loisir (neutre).
+- **Mots des vacances** : vacances, vacance, vacs, vac, congés, congé, CP, repos (casse et
+  accents ignorés). Mots de 3 lettres ou moins jamais corrigés à l'aveugle (« vas »).
 
 ## Avancement V2.2
 
@@ -115,12 +144,19 @@ Modèle de données (`planning_state_v21`) :
       suppression (vise l'événement existant) ; plage = celle dont la fin n'est pas passée ;
       jour de semaine seul = un seul événement, le prochain, aujourd'hui inclus ; « tous les
       / les mercredis » = règle. Les mêmes règles sont données à l'IA dans le prompt.
-      Hors ligne vérifié (ouverture + parser). En attente : **décision de l'utilisateur sur
-      le stockage des heures** (en attendant, l'heure est ajoutée au libellé des événements
-      ponctuels et non enregistrée pour les règles).
+      Hors ligne vérifié (ouverture + parser). Heures : rien pour l'instant (voir « Idées
+      pour plus tard ») ; l'heure reste ajoutée au libellé des événements ponctuels.
 - [x] IA en échec : principal, secours, puis principal retenté ; message simple côté app
       (« Le service est surchargé… »), phrase gardée ; indicateur « ⚡ secours ».
 - [x] « Aujourd'hui : JJ/MM » cliquable (retour au mois en cours, jour sélectionné).
+- [x] Mises à jour : `src/main.jsx` enregistre le service worker via `virtual:pwa-register`
+      → la page se recharge seule sur la nouvelle version (vérif. à chaque retour dans l'app
+      et toutes les heures). Avant, l'iPhone gardait l'ancienne version en cache.
+- [x] Réglages : « Comprises sans IA : X % » et journal local des phrases passées par l'IA
+      (clé `planning_journal_v1`, 200 max) avec « Copier la liste » : l'utilisateur l'envoie
+      pour enrichir le parser.
+- [ ] Phrases complexes à faire comprendre au parser (tests à faire valider AVANT de coder) :
+      « sauf le … », plusieurs dates dans une phrase, personne inconnue « en vacances ».
 - [ ] Branche `claude/export-production` (partie de `main`, bouton d'export seul, lecture
       seule) : **exception validée par l'utilisateur à la règle « une seule fusion »**.
       Ne la fusionner sur `main` qu'après son « fusionne l'export ».
@@ -146,6 +182,13 @@ l'ouverture, du délai artificiel au changement de mois et de rendus inutiles (t
 grille redessinée à chaque lettre tapée). L'envoi de phrase est dominé par Gemini (à
 confirmer sur iPhone via Réglages → Diagnostic de vitesse, qui affiche la durée Gemini, les
 jetons de réflexion et les démarrages à froid).
+
+## Idées pour plus tard (non décidées, ne pas implémenter)
+
+- **Heures** : ajouter un champ « heure » facultatif aux événements et aux règles
+  (« 19:00 » ou « 09:00-12:00 »), affiché devant le nom (« 19h foot »). Le parser reconnaît
+  déjà « à 19h », « 19h30 », « 9h-12h », « de 9h à 12h ».
+- **Changement de couleur** d'une catégorie (« mets le stage en bleu »).
 
 ## Roadmap après la V2.2 (NE PAS implémenter sans demande)
 
