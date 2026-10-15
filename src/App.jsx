@@ -633,6 +633,7 @@ function SettingsSheet({ state, setState, theme, onClose, isMobile, counts }) {
       </Section>
 
       <Section title="Données" theme={theme}>
+        <ExportButton theme={theme} state={state} />
         <button onClick={() => {
           if (confirm('Effacer TOUTES tes données ?')) { setState(DEFAULT_STATE); onClose(); }
         }} style={{
@@ -659,6 +660,43 @@ function SettingsSheet({ state, setState, theme, onClose, isMobile, counts }) {
     );
   }
   return <div style={{ width: 360, background: theme.cardBg, borderLeft: `1px solid ${theme.grid}`, overflowY: 'auto' }}>{content}</div>;
+}
+
+// Export de toutes les données en fichier JSON (lecture seule : ne modifie rien).
+// Format identique à celui que la V2.2 sait importer.
+function ExportButton({ theme, state }) {
+  const [msg, setMsg] = useState(null);
+  const doExport = async () => {
+    const name = `planning-sauvegarde-${fmtDate(new Date())}.json`;
+    const json = JSON.stringify({ app: 'planning', format: STORAGE_KEY, exportedAt: new Date().toISOString(), data: state }, null, 2);
+    const blob = new Blob([json], { type: 'application/json' });
+    // Sur iPhone : feuille de partage (« Enregistrer dans Fichiers »). Sinon : téléchargement.
+    try {
+      const file = new File([blob], name, { type: 'application/json' });
+      if (navigator.canShare && navigator.canShare({ files: [file] })) {
+        await navigator.share({ files: [file], title: 'Sauvegarde Planning' });
+        setMsg('Export prêt.');
+        return;
+      }
+    } catch (e) {
+      if (e && e.name === 'AbortError') return;   // partage annulé
+    }
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = name;
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    setMsg(`Fichier « ${name} » téléchargé.`);
+  };
+  return (
+    <div style={{ marginBottom: 14 }}>
+      <button onClick={doExport} style={{
+        background: theme.gridLight, color: theme.accent, border: 'none', borderRadius: 8,
+        padding: '10px 14px', cursor: 'pointer', fontSize: 14, fontWeight: 500,
+      }}>Exporter mes données (fichier JSON)</button>
+      {msg && <div style={{ marginTop: 8, fontSize: 13, padding: '8px 12px', borderRadius: 8, background: theme.success, color: theme.successText }}>{msg}</div>}
+    </div>
+  );
 }
 
 function DayMonthInput({ theme, day, month, onChange }) {
