@@ -161,9 +161,6 @@ describe('ajouts complets', () => {
     expect(r.status).toBe('ok');
     expect(r.intent).toMatchObject({ kind: 'vacation', label: 'été', date: { type: 'range', start: '2027-08-01', end: '2027-08-15' } });
   });
-  it('X inconnu « en vacances » → IA (personne ou catégorie introuvable)', () => {
-    expect(run('Dupont en vacances du 02/11 au 06/11').status).toBe('ai');
-  });
   it('vacanes du 02/11 au 06/11 → faute tolérée', () => {
     const r = run('vacanes du 02/11 au 06/11');
     expect(r.status).toBe('ok');
@@ -224,19 +221,6 @@ describe('jour de la semaine seul = un seul événement, le prochain, aujourd\'h
       action: 'add', date: { type: 'single', date: '2026-10-18' },
       color: { hex: '#34C759', target: 'pill' }, label: 'nfl',
     });
-  });
-  // Décision : une couleur donnée ne modifie jamais une catégorie existante
-  it('mercredi en rouge foot (foot existe, vert) → ajouté en vert, l\'app le signale', () => {
-    const r = run('mercredi en rouge foot', ETAT);
-    expect(r.status).toBe('ok');
-    expect(r.actions).toEqual([{ type: 'add_event', categoryName: 'foot', label: 'foot', startDate: '2026-10-21', endDate: '2026-10-21' }]);
-    expect(r.summary).toMatch(/Foot garde sa couleur verte/);
-    expect(applyActions(ETAT, r.actions).newState.categories.find(c => c.id === 'c_foot').pillColor).toBe('#34C759');
-  });
-  it('vacances en orange du 02/11 au 06/11 (vacances existent) → couleur inchangée, signalée', () => {
-    const r = run('vacances en orange du 02/11 au 06/11', ETAT);
-    expect(r.actions.some(a => a.type === 'update_category' || a.type === 'create_category')).toBe(false);
-    expect(r.summary).toMatch(/garde sa couleur/);
   });
   it('mercredi en rouge foot → mercredi 21/10, un seul événement', () => {
     const r = run('mercredi en rouge foot');
@@ -385,11 +369,196 @@ describe('synonymes et types', () => {
 
 // ------------------------------------------------------------
 describe('phrases confiées à l\'IA', () => {
-  it('exception dans la phrase (« sauf »)', () => {
-    expect(run('foot tous les vendredis sauf le 03/07').status).toBe('ai');
+  it('un vendredi sur deux', () => {
+    expect(run('foot un vendredi sur deux').status).toBe('ai');
   });
-  it('plusieurs dates séparées', () => {
-    expect(run('Andro les 28 mai, 4, 10 et 11 juin').status).toBe('ai');
+  it('semaines paires', () => {
+    expect(run('foot les semaines paires').status).toBe('ai');
+  });
+});
+
+// ============================================================
+// Couleurs (règle définitive) : chaque type garde sa couleur d'origine ; une couleur donnée
+// pour un type existant ne vaut que pour cet événement-là.
+// ============================================================
+const ETAT_DRX = { ...ETAT, categories: [...ETAT.categories,
+  { id: 'c_drx', name: 'stage chez Dr X', pillColor: '#007AFF', cellColor: null, kind: 'work', subkind: 'stage' }] };
+
+describe('couleurs : propres à l\'événement pour un type existant', () => {
+  it('mercredi en rouge foot (foot existe, vert) → cet événement en rouge, foot reste vert', () => {
+    const r = run('mercredi en rouge foot', ETAT);
+    expect(r.status).toBe('ok');
+    expect(r.actions).toEqual([{ type: 'add_event', categoryName: 'foot', label: 'foot', startDate: '2026-10-21', endDate: '2026-10-21', pillColor: '#FF3B30' }]);
+    const { newState } = applyActions(ETAT, r.actions);
+    expect(newState.categories.find(c => c.id === 'c_foot').pillColor).toBe('#34C759');
+    expect(newState.events.find(e => e.startDate === '2026-10-21').pillColor).toBe('#FF3B30');
+    expect(newState.recurringRules.find(x => x.id === 'r_foot')).toEqual(ETAT.recurringRules[0]);
+  });
+  it('le 01/01 stage chez Dr X (sans couleur) → reprend le bleu d\'origine', () => {
+    const r = run('le 01/01 stage chez Dr X', ETAT_DRX);
+    expect(r.actions).toEqual([{ type: 'add_event', categoryName: 'stage chez Dr X', label: 'stage chez Dr X', startDate: '2027-01-01', endDate: '2027-01-01' }]);
+  });
+  it('stage chez Dr X en vert le 05/01 → cet événement en vert seulement', () => {
+    const r = run('stage chez Dr X en vert le 05/01', ETAT_DRX);
+    expect(r.actions).toEqual([{ type: 'add_event', categoryName: 'stage chez Dr X', label: 'stage chez Dr X', startDate: '2027-01-05', endDate: '2027-01-05', pillColor: '#34C759' }]);
+    expect(applyActions(ETAT_DRX, r.actions).newState.categories.find(c => c.id === 'c_drx').pillColor).toBe('#007AFF');
+  });
+  it('foot en rouge tous les mardis → nouvelle règle en rouge, l\'ancienne règle ne change pas', () => {
+    const r = run('foot en rouge tous les mardis', ETAT);
+    expect(r.actions).toEqual([{ type: 'add_recurring', categoryName: 'foot', weekdays: [1], pillColor: '#FF3B30' }]);
+    const { newState } = applyActions(ETAT, r.actions);
+    expect(newState.recurringRules.find(x => x.id === 'r_foot').pillColor).toBeUndefined();
+    expect(newState.recurringRules.find(x => x.weekdays[0] === 1).pillColor).toBe('#FF3B30');
+  });
+  it('vacances en fond orange du 02/11 au 06/11 (vacances existent) → fond orange pour ces vacances-là', () => {
+    const r = run('vacances en fond orange du 02/11 au 06/11', ETAT);
+    expect(r.actions).toHaveLength(1);
+    expect(r.actions[0]).toMatchObject({ type: 'add_event', categoryName: 'vacances', startDate: '2026-11-02', endDate: '2026-11-06' });
+    expect(r.actions[0].cellColor).toMatch(/^#[0-9A-F]{6}$/);
+  });
+  it('le résumé indique que la couleur ne vaut que pour cet événement', () => {
+    expect(run('mercredi en rouge foot', ETAT).summary).toMatch(/rouge \(cet événement seulement\)/);
+  });
+  it('nouveau type avec couleur → couleur d\'origine du type', () => {
+    expect(run('tennis en violet le 12/11').actions[0]).toMatchObject({ type: 'create_category', name: 'tennis', pillColor: '#8B00FF' });
+  });
+});
+
+// ============================================================
+// « sauf » et ses équivalents
+// ============================================================
+describe('sauf : exceptions', () => {
+  it('foot tous les vendredis sauf le 23/10 (règle existante) → exception ajoutée, pas de 2e règle', () => {
+    const r = run('foot tous les vendredis sauf le 23/10', ETAT);
+    expect(r.status).toBe('ok');
+    expect(r.actions).toEqual([{ type: 'add_rule_exceptions', ruleId: 'r_foot', dates: ['2026-10-23'] }]);
+    const { newState } = applyActions(ETAT, r.actions);
+    expect(newState.recurringRules).toHaveLength(2);
+    expect(newState.recurringRules.find(x => x.id === 'r_foot').exceptions).toEqual(['2026-10-23']);
+  });
+  it('foot tous les vendredis sauf le 23/10 (pas de règle) → nouvelle règle avec exception', () => {
+    const r = run('foot tous les vendredis sauf le 23/10');
+    expect(r.actions.find(a => a.type === 'add_recurring')).toEqual({ type: 'add_recurring', categoryName: 'foot', weekdays: [4], exceptions: ['2026-10-23'] });
+  });
+  for (const mot of ['à part', 'a part', 'excepté', 'hormis', 'mis à part', 'Sauf', 'SAUF']) {
+    it(`équivalent : « ${mot} »`, () => {
+      expect(run(`foot tous les vendredis ${mot} le 23/10`, ETAT).actions).toEqual([{ type: 'add_rule_exceptions', ruleId: 'r_foot', dates: ['2026-10-23'] }]);
+    });
+  }
+  it('sauf le 23/10 et le 06/11 → 2 exceptions', () => {
+    expect(run('foot tous les vendredis sauf le 23/10 et le 06/11', ETAT).actions[0].dates).toEqual(['2026-10-23', '2026-11-06']);
+  });
+  it('sauf du 20/12 au 05/01 → tous les jours de la période', () => {
+    const d = run('foot tous les vendredis sauf du 20/12 au 05/01', ETAT).actions[0].dates;
+    expect(d[0]).toBe('2026-12-20');
+    expect(d[d.length - 1]).toBe('2027-01-05');
+    expect(d).toHaveLength(17);
+  });
+  it('vacances du 20/12 au 05/01 sauf le 25/12 → deux périodes', () => {
+    const r = run('vacances du 20/12 au 05/01 sauf le 25/12', ETAT);
+    expect(r.status).toBe('ok');
+    expect(r.actions.filter(a => a.type === 'add_event').map(a => [a.startDate, a.endDate]))
+      .toEqual([['2026-12-20', '2026-12-24'], ['2026-12-26', '2027-01-05']]);
+  });
+  it('foot tous les vendredis sauf (rien après) → question', () => {
+    const r = run('foot tous les vendredis sauf', ETAT);
+    expect(r.status).toBe('missing');
+    expect(r.message).toMatch(/Sauf quand/);
+  });
+});
+
+describe('jours : tous les jours, en semaine, week-ends', () => {
+  const W = (p) => run(p).intent.date;
+  it('tous les jours = 7 jours', () => expect(W('foot tous les jours')).toMatchObject({ type: 'recurring', weekdays: [0, 1, 2, 3, 4, 5, 6] }));
+  it('chaque jour = 7 jours', () => expect(W('foot chaque jour')).toMatchObject({ type: 'recurring', weekdays: [0, 1, 2, 3, 4, 5, 6] }));
+  it('en semaine = lundi → vendredi', () => expect(W('Montalvo en semaine')).toMatchObject({ type: 'recurring', weekdays: [0, 1, 2, 3, 4] }));
+  it('du lundi au vendredi = règle', () => expect(W('Montalvo du lundi au vendredi')).toMatchObject({ type: 'recurring', weekdays: [0, 1, 2, 3, 4] }));
+  it('tous les week-ends = samedi + dimanche', () => expect(W('foot tous les week-ends')).toMatchObject({ type: 'recurring', weekdays: [5, 6] }));
+  for (const p of ['tous les jours sauf le week-end', 'tous les jours sauf le weekend', 'tous les jours sauf les week-ends',
+    'tous les jours sauf les samedis et dimanches', 'tous les jours sauf le WE', 'tous les jours sauf le w-e']) {
+    it(`foot ${p} → lundi → vendredi`, () => expect(W(`foot ${p}`)).toMatchObject({ type: 'recurring', weekdays: [0, 1, 2, 3, 4] }));
+  }
+  it('Montalvo en semaine sauf le mercredi', () => {
+    const r = run('Montalvo en semaine sauf le mercredi');
+    expect(r.status).toBe('ok');
+    expect(r.actions.find(a => a.type === 'add_recurring')).toEqual({ type: 'add_recurring', categoryName: 'Montalvo', weekdays: [0, 1, 3, 4] });
+  });
+});
+
+// ============================================================
+// « pas de X le … » : retire uniquement cette occurrence
+// ============================================================
+describe('pas de … : une seule occurrence', () => {
+  it('pas de foot le 23/10 → exception sur la règle, la règle reste', () => {
+    const r = run('pas de foot le 23/10', ETAT);
+    expect(r.status).toBe('ok');
+    const { newState } = applyActions(ETAT, r.actions);
+    expect(newState.recurringRules.find(x => x.id === 'r_foot')).toMatchObject({ weekdays: [4], exceptions: ['2026-10-23'] });
+  });
+  it('pas de foot vendredi → vendredi 16/10', () => {
+    const { newState } = applyActions(ETAT, run('pas de foot vendredi', ETAT).actions);
+    expect(newState.recurringRules.find(x => x.id === 'r_foot').exceptions).toEqual(['2026-10-16']);
+  });
+  it('pas de foot le 22/10 (un jeudi, pas de foot ce jour-là) → message, rien ne change', () => {
+    const r = run('pas de foot le 22/10', ETAT);
+    expect(r.status).toBe('missing');
+    expect(r.message).toMatch(/pas de foot/i);
+  });
+  it('pas de garde le 12/11 (événement ponctuel) → seul cet événement est retiré', () => {
+    const st = { ...VIDE, categories: [{ id: 'g', name: 'garde', pillColor: '#FF3B30', cellColor: null, kind: 'work', subkind: 'garde' }],
+      events: [{ id: 'g1', categoryId: 'g', label: 'garde', startDate: '2026-11-12', endDate: '2026-11-12' },
+        { id: 'g2', categoryId: 'g', label: 'garde', startDate: '2026-11-26', endDate: '2026-11-26' }] };
+    const { newState } = applyActions(st, run('pas de garde le 12/11', st).actions);
+    expect(newState.events.map(e => e.id)).toEqual(['g2']);
+  });
+});
+
+// ============================================================
+// Plusieurs dates dans une phrase
+// ============================================================
+describe('plusieurs dates', () => {
+  const dates = (p, st = VIDE) => run(p, st).actions.filter(a => a.type === 'add_event').map(a => a.startDate === a.endDate ? a.startDate : `${a.startDate}→${a.endDate}`);
+  it('Andro les 28 mai, 4, 10 et 11 juin → 4 événements', () => {
+    expect(dates('Andro les 28 mai, 4, 10 et 11 juin')).toEqual(['2027-05-28', '2027-06-04', '2027-06-10', '2027-06-11']);
+  });
+  it('garde le 12/11 et le 26/11', () => expect(dates('garde le 12/11 et le 26/11')).toEqual(['2026-11-12', '2026-11-26']));
+  it('RCP les 3, 10 et 17 novembre', () => expect(dates('RCP les 3, 10 et 17 novembre')).toEqual(['2026-11-03', '2026-11-10', '2026-11-17']));
+  it('stage chez X du 02/11 au 06/11 et du 16/11 au 20/11', () => {
+    expect(dates('stage chez X du 02/11 au 06/11 et du 16/11 au 20/11')).toEqual(['2026-11-02→2026-11-06', '2026-11-16→2026-11-20']);
+  });
+  it('foot mardi et le 12/11', () => expect(dates('foot mardi et le 12/11')).toEqual(['2026-10-20', '2026-11-12']));
+  it('foot le 12 et le 13 → prochaine occurrence : 12 et 13 novembre', () => expect(dates('foot le 12 et le 13')).toEqual(['2026-11-12', '2026-11-13']));
+  it('foot le 15 et le 16 → aujourd\'hui inclus', () => expect(dates('foot le 15 et le 16')).toEqual(['2026-10-15', '2026-10-16']));
+  it('une seule catégorie créée', () => {
+    expect(run('garde le 12/11 et le 26/11').actions.filter(a => a.type === 'create_category')).toHaveLength(1);
+  });
+});
+
+// ============================================================
+// « X en vacances » : X inconnu, ou sans jours récurrents → question, rien n'est retiré
+// ============================================================
+describe('en vacances : cas particuliers', () => {
+  const ETAT_ANDRO = { ...ETAT,
+    categories: [...ETAT.categories, { id: 'c_andro', name: 'Andro', pillColor: '#FF69B4', cellColor: null, kind: 'work', subkind: 'stage' }],
+    events: [...ETAT.events, { id: 'e_andro', categoryId: 'c_andro', label: 'Andro', startDate: '2026-11-04', endDate: '2026-11-04' }] };
+  it('Dupont en vacances (inconnu) → question', () => {
+    const r = run('Dupont en vacances du 02/11 au 06/11', ETAT);
+    expect(r.status).toBe('missing');
+    expect(r.message).toMatch(/Je ne connais pas « Dupont »/);
+  });
+  it('montalvo en vacs du 02/11 au 06/11 → exceptions (majuscules, synonyme)', () => {
+    expect(run('montalvo en vacs du 02/11 au 06/11', ETAT).actions)
+      .toEqual([{ type: 'add_exceptions_to_category', categoryName: 'Montalvo', start: '2026-11-02', end: '2026-11-06' }]);
+  });
+  it('Montalvo en vacances le 03/11 → un seul jour', () => {
+    expect(run('Montalvo en vacances le 03/11', ETAT).actions)
+      .toEqual([{ type: 'add_exceptions_to_category', categoryName: 'Montalvo', start: '2026-11-03', end: '2026-11-03' }]);
+  });
+  it('Andro en vacances (aucune règle) → question, rien n\'est supprimé', () => {
+    const r = run('Andro en vacances du 02/11 au 06/11', ETAT_ANDRO);
+    expect(r.status).toBe('missing');
+    expect(r.message).toMatch(/Andro/);
+    expect(r.actions).toBeUndefined();
   });
 });
 
