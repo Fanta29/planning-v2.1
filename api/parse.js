@@ -1,7 +1,12 @@
-// Fonction serverless Vercel — V2.1.1
-// Améliorations :
-// - Distinction pillColor vs cellColor strictement clarifiée dans le prompt
-// - Fallback automatique gemini-2.5-flash → gemini-2.5-flash-lite si quota 429
+// Fonction serverless Vercel — V2.2
+// - Modèle principal gemini-3.8-flash, réflexion au plus bas ("low" : "minimal" n'existe pas sur ce modèle)
+// - Secours automatique sur gemini-3.5-flash-lite (réflexion "minimal") si quota épuisé (429)
+//   ou modèle surchargé (503)
+// - Sortie structurée : JSON imposé par un schéma (responseJsonSchema)
+// Identifiants vérifiés sur ai.google.dev (docs models / pricing / thinking) le 2026-10-15.
+
+const PRIMARY = { model: 'gemini-3.8-flash', thinkingLevel: 'low' };
+const FALLBACK = { model: 'gemini-3.5-flash-lite', thinkingLevel: 'minimal' };
 
 const WORK_REGULAR_SYNONYMS = [
   'travail', 'travailler', 'taf', 'taffer', 'taffe', 'boulot', 'bosser', 'job',
@@ -87,20 +92,23 @@ RÈGLES STRICTES À APPLIQUER SANS EXCEPTION :
 
 1. Si l'utilisateur dit juste un nom de couleur sans préciser case/fond :
    → tu mets UNIQUEMENT pillColor avec la couleur vive correspondante
-   → tu mets cellColor = null
-   → Exemple : "Montalvo en vert" → pillColor="#34C759", cellColor=null
+   → tu mets cellColor = "none"
+   → Exemple : "Montalvo en vert" → pillColor="#34C759", cellColor="none"
 
 2. Si l'utilisateur dit explicitement "fond X", "cases en X", "fond de case X", "background X" :
    → tu mets UNIQUEMENT cellColor avec la version pastel
-   → tu mets pillColor = null (sauf si l'utilisateur précise aussi une couleur de pilule)
-   → Exemple : "vacances été du 1 au 6 août, fond orange pastel" → cellColor="#FFE5C5", pillColor=null
+   → tu mets pillColor = "none" (sauf si l'utilisateur précise aussi une couleur de pilule)
+   → Exemple : "vacances été du 1 au 6 août, fond orange pastel" → cellColor="#FFE5C5", pillColor="none"
 
 3. Si kind="vacation" et que rien n'est précisé :
    → cellColor = "#FFE5E5" (rouge pastel par défaut)
-   → pillColor = null
+   → pillColor = "none"
    → Pour les vacances, on n'utilise normalement PAS de pilule, juste un fond de case + label
 
 4. cellColor doit TOUJOURS être un hex de la liste pastel (jamais une couleur vive).
+
+5. "Pas de couleur" s'écrit "none". Un champ omis = inchangé (important pour update_category :
+   n'écris QUE les champs que l'utilisateur veut changer).
 
 ==========================================
 TAXONOMIE DES CATÉGORIES
@@ -134,7 +142,7 @@ CAS A — "X en vacances/absent du Y au Z" où X est une CATÉGORIE EXISTANTE :
 
 CAS B — "[mot de vacances] du X au Y" sans nom de catégorie :
   → Vacances personnelles
-  → Si pas de catégorie "vacances" existante, en créer une (cellColor=#FFE5E5, pillColor=null, kind=vacation)
+  → Si pas de catégorie "vacances" existante, en créer une (cellColor=#FFE5E5, pillColor="none", kind=vacation)
   → add_event sur cette catégorie
 
 CAS C — création d'une nouvelle catégorie :
@@ -159,10 +167,11 @@ FORMAT DE RÉPONSE (JSON strict)
 ==========================================
 
 { "actions": [...], "feedback": "résumé court en français" }
+(Le schéma JSON est imposé. N'écris que les champs utiles à chaque action ; "none" = pas de couleur.)
 
 ACTIONS :
 
-1. {"type":"create_category","name":"...","pillColor":"#... ou null","cellColor":"#... ou null","kind":"work|vacation|neutral","subkind":"stage|regular|null"}
+1. {"type":"create_category","name":"...","pillColor":"#... ou none","cellColor":"#... ou none","kind":"work|vacation|neutral","subkind":"stage|regular|none"}
 2. {"type":"update_category","name":"...","pillColor":"...","cellColor":"...","kind":"...","subkind":"..."}
 3. {"type":"delete_category","name":"..."}
 4. {"type":"add_recurring","categoryName":"...","weekdays":[0..6],"startDate":"YYYY-MM-DD","endDate":"YYYY-MM-DD","exceptions":["YYYY-MM-DD"]}
@@ -179,12 +188,12 @@ EXEMPLES CRITIQUES
 ==========================================
 
 "Montalvo en vert les jeudis"
-→ create_category(name:"Montalvo", pillColor:"#34C759", cellColor:null, kind:"work", subkind:"stage")
+→ create_category(name:"Montalvo", pillColor:"#34C759", cellColor:"none", kind:"work", subkind:"stage")
 → add_recurring(categoryName:"Montalvo", weekdays:[3])
 
 "Andro en rose pastel les vendredis"
 (pastel pour pilule = OK, c'est la pilule qui est rose pastel)
-→ create_category(name:"Andro", pillColor:"#FFD5E5", cellColor:null, kind:"work", subkind:"stage")
+→ create_category(name:"Andro", pillColor:"#FFD5E5", cellColor:"none", kind:"work", subkind:"stage")
 → add_recurring(categoryName:"Andro", weekdays:[4])
 
 "HAD en mauve les lundis, fond lavande pastel"
@@ -196,7 +205,7 @@ EXEMPLES CRITIQUES
 → add_exceptions_to_category(categoryName:"Montalvo", start:"2026-05-26", end:"2026-06-12")
 
 "vacances du 1 au 6 juillet : Les Ardentes"
-→ create_category(name:"vacances", pillColor:null, cellColor:"#FFE5E5", kind:"vacation") si pas existante
+→ create_category(name:"vacances", pillColor:"none", cellColor:"#FFE5E5", kind:"vacation") si pas existante
 → add_event(categoryName:"vacances", label:"Les Ardentes", startDate:"2026-07-01", endDate:"2026-07-06")
 
 "Andro les 28 mai, 4, 10 et 11 juin"
@@ -207,7 +216,7 @@ EXEMPLES CRITIQUES
 → add_event(categoryName:"Andro", label:"Andro", startDate:"2026-06-11")
 
 "Topo le 26/05"
-→ create_category(name:"Topo", pillColor:"#007AFF", cellColor:null, kind:"work", subkind:"stage")
+→ create_category(name:"Topo", pillColor:"#007AFF", cellColor:"none", kind:"work", subkind:"stage")
 → add_event(categoryName:"Topo", label:"Topo", startDate:"2026-05-26")
 
 "mode nuit"
@@ -227,23 +236,71 @@ RÈGLES IMPORTANTES
 - "feedback" : court, français, dit ce qui a été fait.`;
 }
 
+// Schéma imposé à la réponse. Une seule forme d'action, champs optionnels selon "type".
+const STR = { type: 'string' };
+const DATE = { type: 'string', description: 'AAAA-MM-JJ' };
+const COLOR = { type: 'string', description: 'hex #RRGGBB, ou "none" pour aucune couleur' };
+const RESPONSE_SCHEMA = {
+  type: 'object',
+  properties: {
+    actions: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: {
+          type: { type: 'string', enum: [
+            'create_category', 'update_category', 'delete_category', 'add_recurring',
+            'add_exceptions_to_category', 'remove_recurring', 'add_event', 'remove_event',
+            'add_note', 'remove_note', 'update_settings',
+          ] },
+          name: STR, newName: STR, categoryName: STR, label: STR, text: STR,
+          pillColor: COLOR, cellColor: COLOR,
+          kind: { type: 'string', enum: ['work', 'vacation', 'neutral'] },
+          subkind: { type: 'string', enum: ['stage', 'regular', 'none'] },
+          weekdays: { type: 'array', items: { type: 'integer', minimum: 0, maximum: 6 }, description: '0=lundi … 6=dimanche' },
+          startDate: DATE, endDate: DATE, start: DATE, end: DATE, date: DATE,
+          exceptions: { type: 'array', items: DATE },
+          vacationPeriod: { type: 'string', enum: ['civil', 'university'] },
+          theme: { type: 'string', enum: ['auto', 'light', 'dark'] },
+        },
+        required: ['type'],
+      },
+    },
+    feedback: { type: 'string' },
+  },
+  required: ['actions', 'feedback'],
+};
+
+// Ramène la sortie au format attendu par applyActions (App.jsx) :
+// champ vide = absent (inchangé), "none" = null (pas de couleur / pas de sous-type).
+function normalizeAction(a) {
+  const out = {};
+  for (const [k, v] of Object.entries(a || {})) {
+    if (v === '' || v === undefined) continue;
+    out[k] = v === 'none' && (k === 'pillColor' || k === 'cellColor' || k === 'subkind') ? null : v;
+  }
+  return out;
+}
+
 // Démarrage à froid : vrai uniquement pour la première requête traitée par cette instance.
 let warm = false;
 
-// Fonction qui appelle un modèle Gemini donné
-async function callGemini(modelName, apiKey, systemPrompt, instruction) {
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${apiKey}`;
+// Appelle un modèle Gemini donné (clé passée en en-tête, jamais dans l'URL)
+async function callGemini({ model, thinkingLevel }, apiKey, systemPrompt, instruction) {
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`;
   const body = {
-    contents: [{ parts: [{ text: instruction }] }],
+    contents: [{ role: 'user', parts: [{ text: instruction }] }],
     systemInstruction: { parts: [{ text: systemPrompt }] },
     generationConfig: {
       temperature: 0.1,
       responseMimeType: 'application/json',
+      responseJsonSchema: RESPONSE_SCHEMA,
+      thinkingConfig: { thinkingLevel },
     },
   };
   return fetch(url, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', 'x-goog-api-key': apiKey },
     body: JSON.stringify(body),
   });
 }
@@ -265,12 +322,12 @@ export default async function handler(req, res) {
   // 1. Tentative avec Flash (modèle principal)
   let usedFallback = false;
   const tGemini = Date.now();
-  let r = await callGemini('gemini-2.5-flash', apiKey, systemPrompt, instruction);
+  let r = await callGemini(PRIMARY, apiKey, systemPrompt, instruction);
 
-  // 2. Si quota 429, fallback automatique sur Lite
-  if (r.status === 429) {
+  // 2. Quota épuisé (429) ou modèle surchargé (503) : secours automatique sur Flash-Lite
+  if (r.status === 429 || r.status === 503) {
     usedFallback = true;
-    r = await callGemini('gemini-2.5-flash-lite', apiKey, systemPrompt, instruction);
+    r = await callGemini(FALLBACK, apiKey, systemPrompt, instruction);
   }
 
   if (!r.ok) {
@@ -290,7 +347,7 @@ export default async function handler(req, res) {
     return res.status(502).json({ error: 'Réponse IA invalide', raw: cleaned });
   }
 
-  if (!parsed.actions) parsed.actions = [];
+  parsed.actions = Array.isArray(parsed.actions) ? parsed.actions.map(normalizeAction) : [];
   if (!parsed.feedback) parsed.feedback = 'Mis à jour.';
   parsed.usedFallback = usedFallback;
   // Mesures affichées dans Réglages → Diagnostic de vitesse
@@ -298,7 +355,7 @@ export default async function handler(req, res) {
     serverMs: Date.now() - tStart,
     geminiMs,
     cold,
-    model: usedFallback ? 'gemini-2.5-flash-lite' : 'gemini-2.5-flash',
+    model: (usedFallback ? FALLBACK : PRIMARY).model,
     thoughtsTokens: data.usageMetadata?.thoughtsTokenCount || 0,
     promptTokens: data.usageMetadata?.promptTokenCount || 0,
   };
