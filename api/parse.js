@@ -159,8 +159,12 @@ Chaque catégorie a un "kind" et éventuellement un "subkind" :
    - Les jours fériés ne sont PAS exclus
    - « vacation pro » est du travail, PAS des vacances
 
-COULEURS DES CATÉGORIES EXISTANTES : ne les change JAMAIS. Une couleur ne s'applique qu'à une
-catégorie nouvelle. N'utilise pas update_category pour changer une couleur.
+COULEURS (règle définitive) : chaque catégorie garde la couleur avec laquelle elle a été créée.
+- Catégorie NOUVELLE + couleur → create_category avec cette couleur.
+- Catégorie EXISTANTE + couleur dans la phrase → la couleur va sur l'événement ou la règle
+  seulement : add_event(..., pillColor) ou add_recurring(..., pillColor) (cellColor si « fond »).
+  Ne change JAMAIS la couleur d'une catégorie existante (pas d'update_category pour une couleur).
+- Sans couleur dans la phrase : ne mets aucune couleur, l'événement reprend celle de sa catégorie.
 FOND DE CASE SANS ÉVÉNEMENT (« en fond vert les lundis ») : action add_background, pas de catégorie.
 
 ==========================================
@@ -206,11 +210,11 @@ ACTIONS :
 1. {"type":"create_category","name":"...","pillColor":"#... ou none","cellColor":"#... ou none","kind":"work|vacation|neutral","subkind":"stage|regular|garde|none"}
 2. {"type":"update_category","name":"...","pillColor":"...","cellColor":"...","kind":"...","subkind":"..."}
 3. {"type":"delete_category","name":"..."}
-4. {"type":"add_recurring","categoryName":"...","weekdays":[0..6],"startDate":"YYYY-MM-DD","endDate":"YYYY-MM-DD","exceptions":["YYYY-MM-DD"]}
+4. {"type":"add_recurring","categoryName":"...","weekdays":[0..6],"startDate":"YYYY-MM-DD","endDate":"YYYY-MM-DD","exceptions":["YYYY-MM-DD"],"pillColor":"(option, couleur de cette règle seulement)"}
    (0=lundi ... 6=dimanche)
 5. {"type":"add_exceptions_to_category","categoryName":"...","start":"YYYY-MM-DD","end":"YYYY-MM-DD"}
 6. {"type":"remove_recurring","categoryName":"..."}
-7. {"type":"add_event","categoryName":"...","label":"...","startDate":"YYYY-MM-DD","endDate":"YYYY-MM-DD"}
+7. {"type":"add_event","categoryName":"...","label":"...","startDate":"YYYY-MM-DD","endDate":"YYYY-MM-DD","pillColor":"(option, couleur de cet événement seulement)"}
 8. {"type":"remove_event","label":"..."} (option "date":"YYYY-MM-DD")
 9. {"type":"add_note","date":"YYYY-MM-DD","text":"..."}
 11. {"type":"add_background","color":"#pastel","weekdays":[0..6],"startDate":"YYYY-MM-DD","endDate":"YYYY-MM-DD"}
