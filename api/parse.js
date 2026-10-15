@@ -71,6 +71,13 @@ COULEURS PASTEL (réservées aux fonds de case "cellColor") :
 - beige pastel : #F0E5D0
 `;
 
+const JOURS = ['dimanche', 'lundi', 'mardi', 'mercredi', 'jeudi', 'vendredi', 'samedi'];
+function todayLong(today) {
+  const [y, m, d] = String(today || '').split('-').map(Number);
+  if (!y) return today;
+  return `${JOURS[new Date(Date.UTC(y, m - 1, d)).getUTCDay()]} ${d}/${String(m).padStart(2, '0')}/${y}`;
+}
+
 function makeSystemPrompt(categories, today) {
   const categoriesList = categories.length > 0
     ? categories.map(c => `- "${c.name}" (kind: ${c.kind || 'neutral'}${c.subkind ? `/${c.subkind}` : ''}, pillColor: ${c.pillColor || 'none'}, cellColor: ${c.cellColor || 'none'})`).join('\n')
@@ -79,8 +86,19 @@ function makeSystemPrompt(categories, today) {
   return `Tu interprètes des instructions en français pour modifier un calendrier personnel.
 
 CONTEXTE :
-- Date d'aujourd'hui : ${today}
-- L'année par défaut est l'année courante.
+- Aujourd'hui : ${todayLong(today)} (${today})
+
+RÈGLES DE DATES (obligatoires) :
+- Format français JJ/MM : 07/01 = 7 janvier. JJ/MM/AAAA accepté.
+- Date sans année = sa PROCHAINE occurrence, aujourd'hui inclus : si elle est déjà passée
+  cette année, c'est l'année suivante (aujourd'hui ${today} : 07/10 → année suivante si passé).
+  EXCEPTION : pour retirer/supprimer, viser l'événement existant correspondant, même passé.
+- Plage "du 20/12 au 05/01" : si la fin est avant le début, la fin est l'année suivante.
+- Jour de la semaine SEUL ("mercredi", "jeudi foot") = UN SEUL événement (add_event) au
+  prochain jour de ce nom, aujourd'hui inclus. "tous les mercredis" / "les mercredis" =
+  règle récurrente (add_recurring).
+- "demain", "après-demain", "lundi prochain", "ce week-end" (samedi + dimanche),
+  "dans 2 semaines" : calcule à partir d'aujourd'hui.
 
 CATÉGORIES ACTUELLES :
 ${categoriesList}
@@ -334,32 +352,49 @@ export default async function handler(req, res) {
 
   const systemPrompt = makeSystemPrompt(categories, today);
 
-  // 1. Tentative avec Flash (modèle principal)
-  let usedFallback = false;
+  // Tentatives successives : principal, secours, puis le principal une 2e fois après une
+  // courte pause (les surcharges Google sont souvent brèves). Chaque tentative a un délai max.
+  const ATTEMPTS = [
+    { cfg: PRIMARY, timeoutMs: PRIMARY_TIMEOUT_MS },
+    { cfg: FALLBACK, timeoutMs: 8000 },
+    { cfg: PRIMARY, timeoutMs: PRIMARY_TIMEOUT_MS, pauseMs: 800 },
+  ];
+  const TRANSIENT = new Set([429, 500, 503, 504]);
   const tGemini = Date.now();
-  let primaryMs = 0;   // temps perdu sur le modèle principal avant de basculer
-  let r = await callGemini(PRIMARY, apiKey, systemPrompt, instruction, PRIMARY_TIMEOUT_MS);
-
-  // 2. Quota épuisé (429), modèle surchargé (503) ou trop lent (504) : secours
-  let fallbackReason = null;
-  if (r.status === 429 || r.status === 503 || r.status === 504) {
-    usedFallback = true;
-    const errTxt = await r.text();
-    fallbackReason = `${r.status} ${errTxt.slice(0, 300)}`;
-    // Visible dans Vercel → Logs : explique pourquoi le secours s'est déclenché
-    console.warn(`[parse] ${PRIMARY.model} indisponible, secours ${FALLBACK.model} : ${fallbackReason}`);
-    const tPrimaryFail = Date.now();
-    primaryMs = tPrimaryFail - tGemini;
-    r = await callGemini(FALLBACK, apiKey, systemPrompt, instruction);
+  const failures = [];          // [{ model, status, ms }] pour le diagnostic
+  let r = null, used = null, tAttempt = tGemini;
+  for (const att of ATTEMPTS) {
+    if (att.pauseMs) await new Promise(ok => setTimeout(ok, att.pauseMs));
+    tAttempt = Date.now();
+    try {
+      r = await callGemini(att.cfg, apiKey, systemPrompt, instruction, att.timeoutMs);
+    } catch (e) {
+      r = { status: 599, ok: false, text: async () => String(e && e.message || e) };   // réseau
+    }
+    if (r.ok) { used = att.cfg; break; }
+    const errTxt = (await r.text()).slice(0, 300);
+    failures.push({ model: att.cfg.model, status: r.status, ms: Date.now() - tAttempt });
+    // Visible dans Vercel → Logs
+    console.warn(`[parse] ${att.cfg.model} a échoué : ${r.status} ${errTxt}`);
+    if (!TRANSIENT.has(r.status) && r.status !== 599) break;   // erreur non passagère : inutile d'insister
   }
 
-  if (!r.ok) {
-    const errTxt = await r.text();
-    return res.status(502).json({ error: `Gemini ${r.status}: ${errTxt}` });
+  if (!used) {
+    const last = failures[failures.length - 1];
+    const overloaded = failures.every(f => TRANSIENT.has(f.status) || f.status === 599);
+    // Jamais d'erreur technique côté utilisateur : un code simple, que l'app traduit.
+    return res.status(overloaded ? 503 : 502).json({
+      code: overloaded ? 'overloaded' : 'ai_error',
+      error: overloaded ? 'Service surchargé' : "L'IA n'a pas pu répondre",
+      failures,
+      lastStatus: last && last.status,
+    });
   }
+  const usedFallback = used === FALLBACK;
+  const primaryMs = tAttempt - tGemini;   // temps perdu avant la tentative qui a réussi
 
   const data = await r.json();
-  const geminiMs = Date.now() - tGemini - primaryMs;
+  const geminiMs = Date.now() - tAttempt;
   const text = data.candidates?.[0]?.content?.parts?.[0]?.text || '';
   const cleaned = text.replace(/```json|```/g, '').trim();
 
@@ -367,7 +402,7 @@ export default async function handler(req, res) {
   try {
     parsed = JSON.parse(cleaned);
   } catch (e) {
-    return res.status(502).json({ error: 'Réponse IA invalide', raw: cleaned });
+    return res.status(502).json({ code: 'ai_error', error: 'Réponse IA invalide', raw: cleaned.slice(0, 500) });
   }
 
   parsed.actions = Array.isArray(parsed.actions) ? parsed.actions.map(normalizeAction) : [];
@@ -378,9 +413,10 @@ export default async function handler(req, res) {
     serverMs: Date.now() - tStart,
     geminiMs,
     cold,
-    model: (usedFallback ? FALLBACK : PRIMARY).model,
-    primaryFailMs: usedFallback ? primaryMs : 0,
-    fallbackStatus: usedFallback ? Number(fallbackReason.slice(0, 3)) : null,
+    model: used.model,
+    primaryFailMs: failures.length ? primaryMs : 0,
+    fallbackStatus: failures.length ? failures[0].status : null,
+    attempts: failures.length + 1,
     thoughtsTokens: data.usageMetadata?.thoughtsTokenCount || 0,
     promptTokens: data.usageMetadata?.promptTokenCount || 0,
   };
