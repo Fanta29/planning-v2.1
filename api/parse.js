@@ -1,13 +1,15 @@
 // Fonction serverless Vercel — V2.2
-// - Modèle principal gemini-3.8-flash, réflexion au plus bas ("low" : "minimal" n'existe pas sur ce modèle)
-// - Secours automatique sur gemini-3.5-flash-lite (réflexion "minimal") si quota épuisé (429),
-//   modèle surchargé (503) ou pas de réponse en 5 s
+// - Modèle principal gemini-3.5-flash-lite (réflexion "minimal") : répond en 1 à 2,5 s.
+// - Secours automatique sur gemini-3.8-flash (réflexion "low", "minimal" n'existe pas sur ce
+//   modèle) si quota épuisé (429), modèle surchargé (503) ou pas de réponse en 5 s.
+//   Ordre choisi le 2026-10-15 après mesure : gemini-3.8-flash renvoyait « 503 forte
+//   demande » (parfois après 8,5 s) ou 429 sur 11 appels sur 12.
 // - Sortie structurée : JSON imposé par un schéma (responseJsonSchema)
 // Identifiants vérifiés sur ai.google.dev (docs models / pricing / thinking) le 2026-10-15.
 
-const PRIMARY = { model: 'gemini-3.8-flash', thinkingLevel: 'low' };
-const FALLBACK = { model: 'gemini-3.5-flash-lite', thinkingLevel: 'minimal' };
-// Le modèle principal peut mettre ~8 s à répondre « 503 surcharge » : au-delà de ce délai,
+const PRIMARY = { model: 'gemini-3.5-flash-lite', thinkingLevel: 'minimal' };
+const FALLBACK = { model: 'gemini-3.8-flash', thinkingLevel: 'low' };
+// Un modèle surchargé peut mettre ~8 s à répondre « 503 » : au-delà de ce délai,
 // on abandonne et on bascule sur le secours au lieu de faire attendre l'utilisateur.
 const PRIMARY_TIMEOUT_MS = 5000;
 
@@ -338,13 +340,13 @@ export default async function handler(req, res) {
   let primaryMs = 0;   // temps perdu sur le modèle principal avant de basculer
   let r = await callGemini(PRIMARY, apiKey, systemPrompt, instruction, PRIMARY_TIMEOUT_MS);
 
-  // 2. Quota épuisé (429), modèle surchargé (503) ou trop lent (504) : secours sur Flash-Lite
+  // 2. Quota épuisé (429), modèle surchargé (503) ou trop lent (504) : secours
   let fallbackReason = null;
   if (r.status === 429 || r.status === 503 || r.status === 504) {
     usedFallback = true;
     const errTxt = await r.text();
     fallbackReason = `${r.status} ${errTxt.slice(0, 300)}`;
-    // Visible dans Vercel → Logs : explique pourquoi le mode éco s'est déclenché
+    // Visible dans Vercel → Logs : explique pourquoi le secours s'est déclenché
     console.warn(`[parse] ${PRIMARY.model} indisponible, secours ${FALLBACK.model} : ${fallbackReason}`);
     const tPrimaryFail = Date.now();
     primaryMs = tPrimaryFail - tGemini;

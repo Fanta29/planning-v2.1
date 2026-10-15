@@ -92,8 +92,9 @@ Modèle de données (`planning_state_v21`) :
 - [x] Étape 1 — Diagnostic de lenteur (voir ci-dessous). Fondu du changement de mois rétabli
       en CSS (180 ms, sans délai, respecte « Réduire les animations »).
 - [x] Export / import JSON (Réglages → Données), logique dans `src/lib/storage.js`.
-- [x] Étape 2 — `gemini-3.8-flash` (thinkingLevel `low` : `minimal` n'existe pas sur ce
-      modèle), secours sur 429/503 `gemini-3.5-flash-lite` (thinkingLevel `minimal`),
+- [x] Étape 2 — **Ordre décidé par l'utilisateur après mesure (choix 1b) : principal
+      `gemini-3.5-flash-lite` (thinkingLevel `minimal`), secours `gemini-3.8-flash`
+      (thinkingLevel `low` : `minimal` n'existe pas sur ce modèle)** sur 429/503/délai,
       `responseJsonSchema`, clé en en-tête, fonction en région `cdg1` (Paris).
       Identifiants vérifiés le 2026-10-15 (ai.google.dev : models, pricing, thinking).
       Quotas du free tier non publiés par modèle : à lire dans AI Studio.
