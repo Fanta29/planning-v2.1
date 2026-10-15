@@ -3,7 +3,7 @@ import {
   ChevronLeft, ChevronRight, Send, Trash2, List, Loader2, RotateCcw, X,
   Settings as SettingsIcon, Sun, Moon, Monitor,
 } from 'lucide-react';
-import { loadState, saveState } from './lib/storage.js';
+import { loadState, saveState, exportState, parseImport } from './lib/storage.js';
 import { recordOpen, recordMonthChange, recordPhrase, getMeasures } from './lib/perf.js';
 
 // ============================================================
@@ -661,6 +661,7 @@ function SettingsSheet({ state, setState, theme, onClose, isMobile, counts }) {
       <DiagnosticSection theme={theme} />
 
       <Section title="Données" theme={theme}>
+        <DataTransfer theme={theme} state={state} setState={setState} />
         <button onClick={() => {
           if (confirm('Effacer TOUTES tes données ?')) { setState(DEFAULT_STATE); onClose(); }
         }} style={{
@@ -670,6 +671,57 @@ function SettingsSheet({ state, setState, theme, onClose, isMobile, counts }) {
       </Section>
     </div>
     </Panel>
+  );
+}
+
+function DataTransfer({ theme, state, setState }) {
+  const fileRef = useRef(null);
+  const [msg, setMsg] = useState(null);
+  const btn = { background: theme.gridLight, color: theme.accent, border: 'none', borderRadius: 8, padding: '10px 14px', cursor: 'pointer', fontSize: 14, fontWeight: 500, textAlign: 'left' };
+
+  const doExport = async () => {
+    const name = `planning-sauvegarde-${fmtDate(new Date())}.json`;
+    const blob = new Blob([exportState(state)], { type: 'application/json' });
+    // Sur iPhone : feuille de partage (« Enregistrer dans Fichiers »). Sinon : téléchargement.
+    try {
+      const file = new File([blob], name, { type: 'application/json' });
+      if (navigator.canShare && navigator.canShare({ files: [file] })) {
+        await navigator.share({ files: [file], title: 'Sauvegarde Planning' });
+        setMsg({ ok: true, text: 'Export prêt.' });
+        return;
+      }
+    } catch (e) {
+      if (e && e.name === 'AbortError') return;   // partage annulé par l'utilisateur
+    }
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = name;
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    setMsg({ ok: true, text: `Fichier « ${name} » téléchargé.` });
+  };
+
+  const onFile = async (e) => {
+    const file = e.target.files && e.target.files[0];
+    e.target.value = '';
+    if (!file) return;
+    const { state: next, error } = parseImport(await file.text(), DEFAULT_STATE);
+    if (error) { setMsg({ ok: false, text: error }); return; }
+    const summary = `${next.categories.length} catégorie(s), ${next.recurringRules.length} règle(s), ${next.events.length} événement(s), ${next.dayNotes.length} note(s)`;
+    if (!confirm(`Remplacer toutes les données actuelles par celles du fichier ?\n\n${summary}`)) return;
+    setState(next);
+    setMsg({ ok: true, text: `Importé : ${summary}.` });
+  };
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 14 }}>
+      <button onClick={doExport} style={btn}>Exporter mes données (fichier JSON)</button>
+      <button onClick={() => fileRef.current && fileRef.current.click()} style={btn}>Importer un fichier…</button>
+      <input ref={fileRef} type="file" accept="application/json,.json" onChange={onFile} style={{ display: 'none' }} />
+      {msg && (
+        <div style={{ fontSize: 13, padding: '8px 12px', borderRadius: 8, background: msg.ok ? theme.success : theme.error, color: msg.ok ? theme.successText : theme.errorText }}>{msg.text}</div>
+      )}
+    </div>
   );
 }
 
