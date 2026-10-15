@@ -3,10 +3,10 @@ import {
   ChevronLeft, ChevronRight, Send, Trash2, List, Loader2, RotateCcw, X,
   Settings as SettingsIcon, Sun, Moon, Monitor,
 } from 'lucide-react';
-import { loadState, saveState, exportState, parseImport } from './lib/storage.js';
+import { loadState, saveState, exportState, parseImport, loadJournal, saveJournal, EMPTY_JOURNAL } from './lib/storage.js';
 import { pad, fmtDate, parseDate, addDays, mondayIdx } from './lib/dates.js';
 import { applyActions } from './lib/actions.js';
-import { interpret } from './lib/parser.js';
+import { interpret, colorName } from './lib/parser.js';
 import { recordOpen, recordMonthChange, recordPhrase, getMeasures } from './lib/perf.js';
 
 // ============================================================
@@ -117,6 +117,7 @@ const DEFAULT_STATE = {
   recurringRules: [],
   events: [],
   dayNotes: [],
+  backgrounds: [],          // fonds de case (« en fond vert les lundis ») : ni catégorie, ni pastille
   settings: {
     vacationPeriod: 'civil',  // 'civil' | 'university' | { startMonth, startDay, endMonth, endDay }
     theme: 'auto',
@@ -196,7 +197,8 @@ function getDayContent(date, currentMonth, state, catById = buildCatMap(state)) 
     if (r.exceptions && r.exceptions.includes(dateStr)) return false;
     const cat = catById.get(r.categoryId);
     // Si catégorie "work" et c'est un férié → masquer (sauf override ponctuel)
-    if (cat && cat.kind === 'work' && holiday) {
+    // (sauf gardes / astreintes : il y a des gardes les jours fériés)
+    if (cat && cat.kind === 'work' && cat.subkind !== 'garde' && holiday) {
       const hasOverride = matchingEvents.some(e => e.categoryId === r.categoryId);
       if (!hasOverride) return false;
     }
@@ -235,7 +237,12 @@ function getDayContent(date, currentMonth, state, catById = buildCatMap(state)) 
   }
 
   const note = state.dayNotes.find(n => n.date === dateStr) || null;
-  return { dateStr, inMonth, wd, isSat, isSun, holiday, activeCategories, note };
+  // Fond de case demandé (« en fond vert les lundis »)
+  const bg = inMonth ? (state.backgrounds || []).find(b =>
+    (!b.weekdays || b.weekdays.includes(wd)) &&
+    (!b.startDate || dateStr >= b.startDate) && (!b.endDate || dateStr <= b.endDate) &&
+    !(b.exceptions || []).includes(dateStr)) : null;
+  return { dateStr, inMonth, wd, isSat, isSun, holiday, activeCategories, note, background: bg ? bg.color : null };
 }
 
 function resolveCellBackground(c, theme) {
@@ -243,6 +250,7 @@ function resolveCellBackground(c, theme) {
   if (c.holiday) return theme.cellHoliday;
   const withCell = c.activeCategories.find(ac => ac.category.cellColor);
   if (withCell) return withCell.category.cellColor;
+  if (c.background) return c.background;
   if (c.isSun) return theme.cellSunday;
   if (c.isSat) return theme.cellSaturday;
   return theme.cellNormal;
@@ -448,6 +456,8 @@ function ListSheet({ state, setState, theme, onClose, isMobile }) {
   const delEvent = (id) => setState(s => ({ ...s, events: s.events.filter(e => e.id !== id) }));
   const delRule = (id) => setState(s => ({ ...s, recurringRules: s.recurringRules.filter(r => r.id !== id) }));
   const delNote = (id) => setState(s => ({ ...s, dayNotes: s.dayNotes.filter(n => n.id !== id) }));
+  const delBackground = (id) => setState(s => ({ ...s, backgrounds: (s.backgrounds || []).filter(b => b.id !== id) }));
+  const backgrounds = state.backgrounds || [];
   return (
     <Panel theme={theme} isMobile={isMobile} title="Tout afficher" onClose={onClose} width={320}>
     <div style={{ fontSize: 13, color: theme.textPrimary }}>
@@ -500,6 +510,18 @@ function ListSheet({ state, setState, theme, onClose, isMobile }) {
           <ListRow key={n.id} theme={theme} dot={theme.accent}
             label={n.text} sub={fmtFr(n.date)}
             onDelete={() => delNote(n.id)} />
+        ))}
+      </Section>
+      <Section title={`Fonds de case (${backgrounds.length})`} theme={theme}>
+        {backgrounds.length === 0 && <Empty theme={theme} />}
+        {backgrounds.map(b => (
+          <ListRow key={b.id} theme={theme} dot={b.color} ring={theme.textSecondary}
+            label={`Fond ${colorName(b.color)}`}
+            sub={[
+              b.weekdays ? 'chaque ' + b.weekdays.map(w => FR_DAYS_FULL[w].toLowerCase()).join(', ') : null,
+              b.startDate ? (b.startDate === b.endDate ? `le ${fmtFr(b.startDate)}` : `du ${fmtFr(b.startDate)} au ${fmtFr(b.endDate)}`) : null,
+            ].filter(Boolean).join(' · ')}
+            onDelete={() => delBackground(b.id)} />
         ))}
       </Section>
     </div>
@@ -577,7 +599,7 @@ function ListRow({ theme, dot, ring, label, sub, onDelete }) {
 // ============================================================
 // RÉGLAGES (avec période vacances customisable)
 // ============================================================
-function SettingsSheet({ state, setState, theme, onClose, isMobile, counts }) {
+function SettingsSheet({ state, setState, theme, onClose, isMobile, counts, journal, setJournal }) {
   const setS = (patch) => setState(s => ({ ...s, settings: { ...s.settings, ...patch } }));
   const isCustom = typeof state.settings.vacationPeriod === 'object' && state.settings.vacationPeriod !== null;
   const period = state.settings.vacationPeriod;
@@ -655,7 +677,9 @@ function SettingsSheet({ state, setState, theme, onClose, isMobile, counts }) {
           )}
       </Section>
 
-      <DiagnosticSection theme={theme} />
+      <DiagnosticSection theme={theme} journal={journal} />
+
+      <JournalSection theme={theme} journal={journal} setJournal={setJournal} />
 
       <Section title="Données" theme={theme}>
         <DataTransfer theme={theme} state={state} setState={setState} />
@@ -722,11 +746,15 @@ function DataTransfer({ theme, state, setState }) {
   );
 }
 
-function DiagnosticSection({ theme }) {
+function DiagnosticSection({ theme, journal }) {
   const m = getMeasures();
   const row = (label, value) => <CountRow key={label} theme={theme} color={theme.textSecondary} label={label} value={value} />;
+  const st = journal.stats;
+  const total = st.parser + st.missing + st.ai;
+  const sansIA = st.parser + st.missing;
   return (
     <Section title="Diagnostic de vitesse" theme={theme}>
+      {row('Comprises sans IA', total ? `${Math.round(100 * sansIA / total)} % (${sansIA} sur ${total})` : '—')}
       {row('Ouverture de l\'app', m.open === null ? '—' : `${m.open} ms`)}
       {row('Changements de mois', m.month.length ? m.month.map(v => `${v}`).join(' · ') + ' ms' : '—')}
       {m.phrase.length === 0 && row('Phrases envoyées', '—')}
@@ -734,9 +762,9 @@ function DiagnosticSection({ theme }) {
         const t = p.timing;
         const parts = p.error ? [p.code === 'overloaded' ? 'échec : service surchargé' : 'échec'] : [
           t && t.model && t.model.replace('gemini-', ''),
-          t && `Gemini ${t.geminiMs} ms`,
+          t && t.geminiMs != null && `Gemini ${t.geminiMs} ms`,
           t && t.fallbackStatus && `bascule après ${t.primaryFailMs} ms (erreur ${t.fallbackStatus})`,
-          t && `serveur ${t.serverMs} ms`,
+          t && t.serverMs != null && `serveur ${t.serverMs} ms`,
           t && t.thoughtsTokens > 0 && `${t.thoughtsTokens} jetons de réflexion`,
           t && t.cold && 'démarrage à froid',
           `affichage ${p.appMs} ms`,
@@ -754,6 +782,57 @@ function DiagnosticSection({ theme }) {
       <p style={{ fontSize: 12, color: theme.textSecondary, margin: '8px 0 0' }}>
         Mesures de cette session uniquement, gardées sur l'appareil. Les plus récentes en premier.
       </p>
+    </Section>
+  );
+}
+
+// Liste des phrases passées par l'IA, à copier pour enrichir le parser
+function journalText(entries) {
+  return entries.map(e => {
+    const d = new Date(e.at);
+    const when = `${pad(d.getDate())}/${pad(d.getMonth() + 1)} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+    const parts = [when, e.text, e.result + (e.model ? ` (${e.model.replace('gemini-', '')})` : '')];
+    if (e.why) parts.push(`raison : ${e.why}`);
+    if (e.feedback) parts.push(`IA : ${e.feedback}`);
+    if (e.actions && e.actions.length) parts.push(`actions : ${JSON.stringify(e.actions)}`);
+    return parts.join(' | ');
+  }).join('\n');
+}
+
+function JournalSection({ theme, journal, setJournal }) {
+  const [msg, setMsg] = useState(null);
+  const entries = journal.entries;
+  const btn = { background: theme.gridLight, color: theme.accent, border: 'none', borderRadius: 8, padding: '8px 12px', cursor: 'pointer', fontSize: 13, fontWeight: 500 };
+  const copy = async () => {
+    const txt = journalText(entries);
+    try { await navigator.clipboard.writeText(txt); setMsg('Liste copiée.'); }
+    catch (e) {
+      // Repli : sélection d'un champ texte caché
+      const ta = document.createElement('textarea');
+      ta.value = txt; document.body.appendChild(ta); ta.select();
+      try { document.execCommand('copy'); setMsg('Liste copiée.'); } catch (e2) { setMsg('Copie impossible.'); }
+      ta.remove();
+    }
+  };
+  return (
+    <Section title={`Phrases passées par l'IA (${entries.length})`} theme={theme}>
+      {entries.length === 0 && <Empty theme={theme} />}
+      {entries.slice(0, 30).map((e, i) => (
+        <div key={i} style={{ padding: '6px 0', borderBottom: `1px solid ${theme.gridLight}` }}>
+          <div style={{ fontSize: 14 }}>{e.text}</div>
+          <div style={{ fontSize: 12, color: theme.textSecondary, marginTop: 2 }}>
+            {e.result}{e.feedback ? ` · ${e.feedback}` : ''}
+          </div>
+        </div>
+      ))}
+      {entries.length > 30 && <p style={{ fontSize: 12, color: theme.textSecondary }}>… et {entries.length - 30} de plus (toutes incluses dans la copie).</p>}
+      {entries.length > 0 && (
+        <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
+          <button onClick={copy} style={btn}>Copier la liste</button>
+          <button onClick={() => { if (confirm('Vider le journal ?')) setJournal({ ...EMPTY_JOURNAL, stats: journal.stats }); }} style={{ ...btn, color: theme.errorText }}>Vider</button>
+        </div>
+      )}
+      {msg && <div style={{ fontSize: 13, marginTop: 8, color: theme.successText }}>{msg}</div>}
     </Section>
   );
 }
@@ -892,8 +971,10 @@ function computeCounts(state, refDate) {
     // Si l'utilisateur est en vacances ce jour, on ne compte pas
     const inVac = vacEvents.some(e => ds >= e.startDate && ds <= (e.endDate || e.startDate));
 
-    if (!hol && !inVac) {
+    if (!inVac) {
       for (const { cat, rules, events } of workCats) {
+        // Jours fériés : pas comptés, sauf pour les gardes / astreintes
+        if (hol && cat.subkind !== 'garde') continue;
         // 1. Vérifier les règles récurrentes
         let active = false;
         for (const r of rules) {
@@ -956,6 +1037,13 @@ export default function App() {
   const [state, setState] = useState(() => loadState(DEFAULT_STATE));
   const theme = useTheme(state.settings.theme);
   const [history, setHistory] = useState([]);
+  // Journal des phrases passées par l'IA + compteurs (compris sans IA / avec IA)
+  const [journal, setJournal] = useState(loadJournal);
+  useEffect(() => { saveJournal(journal); }, [journal]);
+  const logPhrase = (kind, entry) => setJournal(j => ({
+    stats: { ...j.stats, [kind]: (j.stats[kind] || 0) + 1 },
+    entries: entry ? [{ at: new Date().toISOString(), ...entry }, ...j.entries].slice(0, 200) : j.entries,
+  }));
   const today = useMemo(() => new Date(), []);
   const [year, setYear] = useState(today.getFullYear());
   const [month, setMonth] = useState(today.getMonth() + 1);
@@ -997,6 +1085,7 @@ export default function App() {
         setState(newState);
         setFeedback({ type: 'ok', text: parsed.summary });
         setInput('');
+        logPhrase('parser');
       } else {
         setFeedback({ type: 'err', text: 'Rien trouvé.' });
       }
@@ -1005,11 +1094,13 @@ export default function App() {
     if (parsed.status === 'missing') {
       // Tout est compris mais il manque une pièce : on le dit, la phrase reste dans le champ
       setFeedback({ type: 'err', text: parsed.message });
+      logPhrase('missing');
       return;
     }
     // 2. Dernier recours : l'IA (impossible hors ligne)
     if (typeof navigator !== 'undefined' && navigator.onLine === false) {
       setFeedback({ type: 'err', text: "Hors ligne, je ne comprends pas cette phrase : reformule-la plus simplement, ou réessaie avec du réseau." });
+      logPhrase('ai', { text, why: parsed.reason, result: 'hors ligne, non envoyée' });
       return;
     }
 
@@ -1029,10 +1120,15 @@ export default function App() {
       }
       setInput('');
       recordPhrase({ networkMs: Math.round(tNet - t0), timing: result.timing || null }, tNet);
+      logPhrase('ai', {
+        text, why: parsed.reason, model: result.timing && result.timing.model,
+        result: changed ? 'appliqué' : 'rien trouvé', feedback: result.feedback, actions: result.actions,
+      });
     } catch (e) {
       // La phrase reste dans le champ : il suffit de renvoyer.
       recordPhrase({ networkMs: Math.round(performance.now() - t0), error: true, code: e && e.code });
       setFeedback({ type: 'err', text: friendlyError(e) });
+      logPhrase('ai', { text, why: parsed.reason, result: `échec : ${e && e.code === 'overloaded' ? 'service surchargé' : 'IA indisponible'}` });
     } finally {
       setProcessing(false);
     }
@@ -1235,10 +1331,10 @@ export default function App() {
           )}
         </div>
         {!isMobile && showSheet && <ListSheet state={state} setState={setState} theme={theme} onClose={() => setShowSheet(false)} isMobile={false} />}
-        {!isMobile && showSettings && <SettingsSheet state={state} setState={setState} theme={theme} onClose={() => setShowSettings(false)} isMobile={false} counts={counts} />}
+        {!isMobile && showSettings && <SettingsSheet state={state} setState={setState} theme={theme} onClose={() => setShowSettings(false)} isMobile={false} counts={counts} journal={journal} setJournal={setJournal} />}
       </main>
       {isMobile && showSheet && <ListSheet state={state} setState={setState} theme={theme} onClose={() => setShowSheet(false)} isMobile={true} />}
-      {isMobile && showSettings && <SettingsSheet state={state} setState={setState} theme={theme} onClose={() => setShowSettings(false)} isMobile={true} counts={counts} />}
+      {isMobile && showSettings && <SettingsSheet state={state} setState={setState} theme={theme} onClose={() => setShowSettings(false)} isMobile={true} counts={counts} journal={journal} setJournal={setJournal} />}
 
       <footer style={{
         background: theme.cardBg, borderTop: `1px solid ${theme.grid}`,

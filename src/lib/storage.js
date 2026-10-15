@@ -21,7 +21,7 @@ export function saveState(state) {
 // EXPORT / IMPORT (fichier JSON) — sauvegarde, et passage des données
 // d'une adresse à une autre (production -> preview).
 // ============================================================
-const LISTS = ['categories', 'recurringRules', 'events', 'dayNotes'];
+const LISTS = ['categories', 'recurringRules', 'events', 'dayNotes', 'backgrounds'];
 
 export function exportState(state, now = new Date()) {
   return JSON.stringify({
@@ -46,4 +46,27 @@ export function parseImport(text, defaultState) {
   const state = { ...defaultState, ...data, settings: { ...defaultState.settings, ...(data.settings || {}) } };
   for (const k of LISTS) state[k] = Array.isArray(data[k]) ? data[k] : [];
   return { state };
+}
+
+// ============================================================
+// JOURNAL — phrases passées par l'IA (pour enrichir le parser) et compteurs
+// « compris sans IA ». Gardé sur l'appareil uniquement, séparé des données.
+// ============================================================
+const JOURNAL_KEY = 'planning_journal_v1';
+const JOURNAL_MAX = 200;
+export const EMPTY_JOURNAL = { stats: { parser: 0, missing: 0, ai: 0 }, entries: [] };
+
+export function loadJournal() {
+  try {
+    const raw = localStorage.getItem(JOURNAL_KEY);
+    if (raw) {
+      const j = JSON.parse(raw);
+      return { stats: { ...EMPTY_JOURNAL.stats, ...(j.stats || {}) }, entries: Array.isArray(j.entries) ? j.entries : [] };
+    }
+  } catch (e) {}
+  return EMPTY_JOURNAL;
+}
+
+export function saveJournal(journal) {
+  try { localStorage.setItem(JOURNAL_KEY, JSON.stringify({ ...journal, entries: journal.entries.slice(0, JOURNAL_MAX) })); } catch (e) {}
 }
