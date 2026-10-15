@@ -97,6 +97,15 @@ Modèle de données (`planning_state_v21`) :
       `responseJsonSchema`, clé en en-tête, fonction en région `cdg1` (Paris).
       Identifiants vérifiés le 2026-10-15 (ai.google.dev : models, pricing, thinking).
       Quotas du free tier non publiés par modèle : à lire dans AI Studio.
+      Délai max de 5 s sur le principal, puis secours (504 interne).
+      Test réel sur la preview le 2026-10-15 (12 phrases) : gemini-3.8-flash a répondu 1 fois
+      sur 12 (« 503 forte demande » ou délai dépassé, puis 429 quota après ~10 appels) ;
+      Flash-Lite répond en 1,0 à 2,5 s avec 0 jeton de réflexion. Qualité Flash-Lite : correct
+      sur foot/vendredis, cours de sport (bornes), vacances (plage), stage chez X, Montalvo en
+      vacances ; faux sur « retire les vas du … au … » (exceptions au lieu de supprimer les
+      vacances), « en fond vert les lundis » (demande une catégorie), « vert pastel » (mis en
+      fond au lieu de la pastille), « décale le foot au jeudi », « garde le 12/11 » (rien).
+      Dates sans année : l'IA met l'année courante même si la date est passée (07/10 → 2026).
 - [ ] Étape 3 + 4 — Parser natif dans **son propre fichier `src/lib/parser.js`** (séparé
       d'App.jsx, testable seul) : actions, dates, heures, couleurs, types, fautes de frappe,
       hors ligne. Tests Vitest écrits en premier, date de référence fixe.
